@@ -6,12 +6,12 @@ import AbonosGrid from '../../components/AbonosGrid.jsx'
 export default function AdminAbonos() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [socios, setSocios] = useState([])
+  const [people, setPeople] = useState([])
   const [selectedUserId, setSelectedUserId] = useState('')
 
   const selected = useMemo(
-    () => socios.find((s) => s.user_id === selectedUserId) ?? null,
-    [socios, selectedUserId],
+    () => people.find((s) => s.user_id === selectedUserId) ?? null,
+    [people, selectedUserId],
   )
 
   useEffect(() => {
@@ -21,24 +21,63 @@ export default function AdminAbonos() {
       setLoading(true)
       setError('')
 
-      const { data, error: selectError } = await supabase
-        .from('profiles')
-        .select('user_id, full_name, phone, is_active')
-        .eq('role', 'socio')
-        .or('is_active.is.null,is_active.eq.true')
-        .order('full_name', { ascending: true })
-
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
       if (!active) return
 
-      if (selectError) {
+      if (sessionError) {
         setLoading(false)
-        setError(selectError.message)
+        setError(sessionError.message)
         return
       }
 
-      const list = data ?? []
-      setSocios(list)
-      if (!selectedUserId && list[0]?.user_id) setSelectedUserId(list[0].user_id)
+      const session = sessionData.session
+      if (!session) {
+        setLoading(false)
+        setError('No hay sesión activa')
+        return
+      }
+
+      const [sociosRes, meRes] = await Promise.all([
+        supabase
+          .from('profiles')
+          .select('user_id, full_name, phone, is_active')
+          .eq('role', 'socio')
+          .or('is_active.is.null,is_active.eq.true')
+          .order('full_name', { ascending: true }),
+        supabase
+          .from('profiles')
+          .select('user_id, full_name, phone')
+          .eq('user_id', session.user.id)
+          .maybeSingle(),
+      ])
+
+      if (!active) return
+
+      if (sociosRes.error) {
+        setLoading(false)
+        setError(sociosRes.error.message)
+        return
+      }
+
+      if (meRes.error) {
+        setLoading(false)
+        setError(meRes.error.message)
+        return
+      }
+
+      const me = meRes.data
+        ? {
+            user_id: meRes.data.user_id,
+            full_name: meRes.data.full_name ? `Yo (Admin) · ${meRes.data.full_name}` : 'Yo (Admin)',
+            phone: meRes.data.phone ?? '—',
+          }
+        : { user_id: session.user.id, full_name: 'Yo (Admin)', phone: '—' }
+
+      const socios = sociosRes.data ?? []
+      const combined = [me, ...socios.filter((s) => s.user_id !== me.user_id)]
+
+      setPeople(combined)
+      setSelectedUserId((prev) => prev || me.user_id)
       setLoading(false)
     }
 
@@ -47,14 +86,14 @@ export default function AdminAbonos() {
     return () => {
       active = false
     }
-  }, [selectedUserId])
+  }, [])
 
   return (
     <div>
       <div className="mb-5">
         <h1 className="text-2xl font-semibold tracking-tight">Gestionar Abonos</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Registra abonos manuales y gestiona solicitudes de socios. Dos por mes (Q1 y Q2).
+          Registra abonos manuales y gestiona solicitudes. Dos por mes (Q1 y Q2).
         </p>
       </div>
 
@@ -62,7 +101,7 @@ export default function AdminAbonos() {
         <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-center">
           <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
             <Users className="h-4 w-4 text-purple-700" aria-hidden="true" />
-            Socio
+            Persona
           </div>
           <select
             className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
@@ -70,9 +109,9 @@ export default function AdminAbonos() {
             onChange={(e) => setSelectedUserId(e.target.value)}
             disabled={loading}
           >
-            {socios.map((s) => (
+            {people.map((s) => (
               <option key={s.user_id} value={s.user_id}>
-                {(s.full_name || 'Sin nombre') + ' — ' + s.phone}
+                {(s.full_name || 'Sin nombre') + ' — ' + (s.phone ?? '—')}
               </option>
             ))}
           </select>

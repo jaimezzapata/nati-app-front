@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Check, Pencil, RefreshCw, Send, X } from 'lucide-react'
+import { Check, Layers, Pencil, RefreshCw, Send, X } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient.js'
 
 function isoDate(date) {
@@ -22,6 +22,21 @@ function formatCop(value) {
   } catch {
     return `$ ${Number(value || 0).toLocaleString('es-CO')}`
   }
+}
+
+function toDatetimeLocal(value) {
+  if (!value) return ''
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return ''
+  const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+  return local.toISOString().slice(0, 16)
+}
+
+function datetimeLocalToIso(value) {
+  if (!value) return null
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toISOString()
 }
 
 function getPeriodMonths(now = new Date()) {
@@ -104,6 +119,18 @@ export default function AbonosGrid({ mode, userId }) {
   const [amount, setAmount] = useState('')
   const [note, setNote] = useState('')
   const [status, setStatus] = useState('pending')
+  const [paidAt, setPaidAt] = useState('')
+
+  const [bulkOpen, setBulkOpen] = useState(false)
+  const [bulkFrom, setBulkFrom] = useState('')
+  const [bulkTo, setBulkTo] = useState('')
+  const [bulkAction, setBulkAction] = useState('create')
+  const [bulkQuincena, setBulkQuincena] = useState('both')
+  const [bulkAmount, setBulkAmount] = useState('')
+  const [bulkNote, setBulkNote] = useState('')
+  const [bulkPaidAt, setBulkPaidAt] = useState(toDatetimeLocal(new Date().toISOString()))
+  const [bulkStatus, setBulkStatus] = useState('approved')
+  const [bulkSaving, setBulkSaving] = useState(false)
 
   const cellRecordsMap = useMemo(() => {
     const m = new Map()
@@ -141,6 +168,12 @@ export default function AbonosGrid({ mode, userId }) {
       .reduce((acc, r) => acc + Number(r.amount || 0), 0)
   }, [rows])
 
+  const monthIndexByPeriodDate = useMemo(() => {
+    const m = new Map()
+    months.forEach((mm, i) => m.set(mm.periodDate, i))
+    return m
+  }, [months])
+
   const load = useCallback(async () => {
     if (!userId) return
     setLoading(true)
@@ -149,23 +182,45 @@ export default function AbonosGrid({ mode, userId }) {
     const from = isoDate(periodStart)
     const to = isoDate(periodEnd)
 
-    const { data, error: selectError } = await supabase
+    const first = await supabase
       .from('abonos')
-      .select('id, user_id, period_date, quincena, amount, status, note, created_at, created_by')
+      .select('id, user_id, period_date, quincena, amount, status, note, created_at, created_by, paid_at')
       .eq('user_id', userId)
       .gte('period_date', from)
       .lte('period_date', to)
       .order('period_date', { ascending: true })
       .order('quincena', { ascending: true })
 
-    if (selectError) {
+    if (first.error) {
+      if (first.error.code === '42703' && String(first.error.message ?? '').includes('paid_at')) {
+        const second = await supabase
+          .from('abonos')
+          .select('id, user_id, period_date, quincena, amount, status, note, created_at, created_by')
+          .eq('user_id', userId)
+          .gte('period_date', from)
+          .lte('period_date', to)
+          .order('period_date', { ascending: true })
+          .order('quincena', { ascending: true })
+
+        if (second.error) {
+          setLoading(false)
+          const extra = [second.error.code, second.error.hint].filter(Boolean).join(' · ')
+          setError(extra ? `${second.error.message} (${extra})` : second.error.message)
+          return
+        }
+
+        setRows(second.data ?? [])
+        setLoading(false)
+        return
+      }
+
       setLoading(false)
-      const extra = [selectError.code, selectError.hint].filter(Boolean).join(' · ')
-      setError(extra ? `${selectError.message} (${extra})` : selectError.message)
+      const extra = [first.error.code, first.error.hint].filter(Boolean).join(' · ')
+      setError(extra ? `${first.error.message} (${extra})` : first.error.message)
       return
     }
 
-    setRows(data ?? [])
+    setRows(first.data ?? [])
     setLoading(false)
   }, [periodEnd, periodStart, userId])
 
@@ -207,6 +262,7 @@ export default function AbonosGrid({ mode, userId }) {
     setModalCell({ month, quincena, existing, history })
     setAmount(existing?.amount ? String(existing.amount) : '')
     setNote(existing?.note ?? '')
+    setPaidAt(toDatetimeLocal(existing?.paid_at || existing?.created_at || new Date().toISOString()))
     if (mode === 'admin') setStatus(existing?.status ?? 'approved')
     else setStatus('pending')
     setModalOpen(true)
@@ -245,6 +301,7 @@ export default function AbonosGrid({ mode, userId }) {
 
     setSaving(true)
 
+    const paidIso = datetimeLocalToIso(paidAt) || new Date().toISOString()
     const payload = {
       user_id: userId,
       period_date: modalCell.month.periodDate,
@@ -253,6 +310,7 @@ export default function AbonosGrid({ mode, userId }) {
       note: String(note ?? '').trim() || null,
       status: mode === 'admin' ? status : 'pending',
       created_by: session.user.id,
+      paid_at: paidIso,
     }
 
     const shouldInsert =
@@ -266,6 +324,7 @@ export default function AbonosGrid({ mode, userId }) {
           amount: payload.amount,
           note: payload.note,
           status: payload.status,
+          paid_at: payload.paid_at,
         })
         .eq('id', modalCell.existing.id)
 
@@ -292,6 +351,145 @@ export default function AbonosGrid({ mode, userId }) {
     }
 
     setModalOpen(false)
+    await load()
+  }
+
+  function openBulk() {
+    const now = new Date()
+    const currentPeriodDate = isoDate(new Date(now.getFullYear(), now.getMonth(), 1))
+    const fallback = months.find((m) => m.periodDate === currentPeriodDate)?.periodDate ?? months.at(0)?.periodDate ?? ''
+    setBulkFrom(fallback)
+    setBulkTo(fallback)
+    setBulkAction('create')
+    setBulkQuincena('both')
+    setBulkAmount('')
+    setBulkNote('')
+    setBulkPaidAt(toDatetimeLocal(new Date().toISOString()))
+    setBulkStatus('approved')
+    setBulkOpen(true)
+  }
+
+  async function handleBulkSave() {
+    setError('')
+    if (!bulkFrom || !bulkTo) {
+      setError('Selecciona el rango de meses')
+      return
+    }
+
+    const fromIdx = monthIndexByPeriodDate.get(bulkFrom)
+    const toIdx = monthIndexByPeriodDate.get(bulkTo)
+    if (typeof fromIdx !== 'number' || typeof toIdx !== 'number') {
+      setError('Rango inválido')
+      return
+    }
+
+    const start = Math.min(fromIdx, toIdx)
+    const end = Math.max(fromIdx, toIdx)
+    const selectedMonths = months.slice(start, end + 1)
+
+    const qs = bulkQuincena === 'both' ? [1, 2] : [Number(bulkQuincena)]
+    if (!qs.every((q) => q === 1 || q === 2)) {
+      setError('Selecciona una quincena válida')
+      return
+    }
+
+    if (mode === 'admin' && bulkAction === 'approve') {
+      const idsToApprove = []
+      for (const m of selectedMonths) {
+        for (const q of qs) {
+          const key = `${m.periodDate}|${q}`
+          const existing = latestRecordMap.get(key) ?? null
+          if (existing?.id && existing.status === 'pending') idsToApprove.push(existing.id)
+        }
+      }
+
+      if (!idsToApprove.length) {
+        setError('No hay abonos Pendientes para aprobar en ese rango.')
+        return
+      }
+
+      setBulkSaving(true)
+      const { error: updateError } = await supabase
+        .from('abonos')
+        .update({ status: 'approved' })
+        .in('id', idsToApprove)
+      setBulkSaving(false)
+
+      if (updateError) {
+        setError(updateError.message)
+        return
+      }
+
+      setBulkOpen(false)
+      await load()
+      return
+    }
+
+    const raw = String(bulkAmount ?? '').replace(/[^\d]/g, '')
+    const numeric = raw ? Number(raw) : 0
+    if (!numeric || numeric <= 0) {
+      setError('Ingresa un valor válido')
+      return
+    }
+
+    const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
+    if (sessionError) {
+      setError(sessionError.message)
+      return
+    }
+
+    const session = sessionData.session
+    if (!session) {
+      setError('No hay sesión activa')
+      return
+    }
+
+    const paidIso = datetimeLocalToIso(bulkPaidAt) || new Date().toISOString()
+    const desiredStatus = mode === 'admin' ? bulkStatus : 'pending'
+
+    const payloads = []
+    for (const m of selectedMonths) {
+      for (const q of qs) {
+        const key = `${m.periodDate}|${q}`
+        const existing = latestRecordMap.get(key) ?? null
+
+        if (mode !== 'admin' && existing?.status && existing.status !== 'rejected') continue
+        if (existing?.status === 'pending' || existing?.status === 'approved') continue
+
+        payloads.push({
+          user_id: userId,
+          period_date: m.periodDate,
+          quincena: q,
+          amount: numeric,
+          note: String(bulkNote ?? '').trim() || null,
+          status: desiredStatus,
+          created_by: session.user.id,
+          paid_at: paidIso,
+        })
+      }
+    }
+
+    if (!payloads.length) {
+      setError('No hay cuotas disponibles para registrar en ese rango (ya existen Pendientes/Aprobadas).')
+      return
+    }
+
+    setBulkSaving(true)
+    const { error: insertError } = await supabase.from('abonos').insert(payloads)
+    setBulkSaving(false)
+
+    if (insertError) {
+      if (insertError.code === '23505') {
+        setError(
+          'No se pudo guardar el aporte masivo porque la base de datos no permite múltiples intentos para el mismo periodo/quincena. Hay que ajustar la restricción UNIQUE para conservar historial.',
+        )
+        return
+      }
+      setError(insertError.message)
+      return
+    }
+
+    setBulkOpen(false)
     await load()
   }
 
@@ -380,15 +578,25 @@ export default function AbonosGrid({ mode, userId }) {
                 {formatCop(totalAhorrado)}
               </div>
             </div>
-            <button
-              type="button"
-              onClick={load}
-              className="grid h-10 w-10 place-items-center rounded-2xl border border-purple-200/60 bg-white text-slate-900 shadow-sm transition hover:bg-purple-100 focus:outline-none focus:ring-4 focus:ring-purple-200"
-              aria-label="Actualizar"
-              title="Actualizar"
-            >
-              <RefreshCw className="h-4 w-4" aria-hidden="true" />
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={openBulk}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-100 focus:outline-none focus:ring-4 focus:ring-purple-200"
+              >
+                <Layers className="h-4 w-4" aria-hidden="true" />
+                Masivo
+              </button>
+              <button
+                type="button"
+                onClick={load}
+                className="grid h-10 w-10 place-items-center rounded-2xl border border-purple-200/60 bg-white text-slate-900 shadow-sm transition hover:bg-purple-100 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                aria-label="Actualizar"
+                title="Actualizar"
+              >
+                <RefreshCw className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -446,8 +654,9 @@ export default function AbonosGrid({ mode, userId }) {
                   .slice()
                   .reverse()
                   .map((h) => {
-                    const when = h?.created_at
-                      ? new Date(h.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                    const whenValue = h?.paid_at || h?.created_at
+                    const when = whenValue
+                      ? new Date(whenValue).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
                       : '—'
                     return (
                       <div
@@ -478,6 +687,17 @@ export default function AbonosGrid({ mode, userId }) {
               </div>
             </div>
           ) : null}
+
+          <label className="grid gap-2">
+            <span className="text-xs font-semibold text-slate-500">Fecha del aporte</span>
+            <input
+              className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
+              type="datetime-local"
+              value={paidAt}
+              onChange={(e) => setPaidAt(e.target.value)}
+              disabled={mode !== 'admin' && modalCell?.existing?.status && modalCell.existing.status !== 'rejected'}
+            />
+          </label>
 
           <label className="grid gap-2">
             <span className="text-xs font-semibold text-slate-500">Valor</span>
@@ -554,6 +774,162 @@ export default function AbonosGrid({ mode, userId }) {
                   {saving ? 'Enviando…' : 'Enviar'}
                 </>
               )}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={bulkOpen}
+        title={mode === 'admin' ? 'Aporte masivo' : 'Solicitud masiva de abonos'}
+        onClose={() => setBulkOpen(false)}
+      >
+        <div className="grid gap-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="grid gap-2">
+              <span className="text-xs font-semibold text-slate-500">Desde</span>
+              <select
+                className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
+                value={bulkFrom}
+                onChange={(e) => setBulkFrom(e.target.value)}
+                disabled={bulkSaving}
+              >
+                {months.map((m) => (
+                  <option key={m.periodDate} value={m.periodDate}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-2">
+              <span className="text-xs font-semibold text-slate-500">Hasta</span>
+              <select
+                className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
+                value={bulkTo}
+                onChange={(e) => setBulkTo(e.target.value)}
+                disabled={bulkSaving}
+              >
+                {months.map((m) => (
+                  <option key={m.periodDate} value={m.periodDate}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            {mode === 'admin' ? (
+              <label className="grid gap-2">
+                <span className="text-xs font-semibold text-slate-500">Acción</span>
+                <select
+                  className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
+                  value={bulkAction}
+                  onChange={(e) => setBulkAction(e.target.value)}
+                  disabled={bulkSaving}
+                >
+                  <option value="create">Registrar cuotas</option>
+                  <option value="approve">Aprobar pendientes</option>
+                </select>
+              </label>
+            ) : null}
+
+            <label className="grid gap-2">
+              <span className="text-xs font-semibold text-slate-500">Quincena</span>
+              <select
+                className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
+                value={bulkQuincena}
+                onChange={(e) => setBulkQuincena(e.target.value)}
+                disabled={bulkSaving}
+              >
+                <option value="both">Q1 y Q2</option>
+                <option value="1">Solo Q1</option>
+                <option value="2">Solo Q2</option>
+              </select>
+            </label>
+
+            {mode === 'admin' && bulkAction === 'create' ? (
+              <label className="grid gap-2">
+                <span className="text-xs font-semibold text-slate-500">Estado</span>
+                <select
+                  className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
+                  value={bulkStatus}
+                  onChange={(e) => setBulkStatus(e.target.value)}
+                  disabled={bulkSaving}
+                >
+                  <option value="approved">Aprobado</option>
+                  <option value="pending">Pendiente</option>
+                </select>
+              </label>
+            ) : null}
+          </div>
+
+          {!(mode === 'admin' && bulkAction === 'approve') ? (
+            <>
+              <label className="grid gap-2">
+                <span className="text-xs font-semibold text-slate-500">Fecha del aporte</span>
+                <input
+                  className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
+                  type="datetime-local"
+                  value={bulkPaidAt}
+                  onChange={(e) => setBulkPaidAt(e.target.value)}
+                  disabled={bulkSaving}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-xs font-semibold text-slate-500">Valor (por cuota)</span>
+                <input
+                  className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
+                  inputMode="numeric"
+                  value={bulkAmount}
+                  onChange={(e) => setBulkAmount(e.target.value)}
+                  placeholder="50000"
+                  disabled={bulkSaving}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-xs font-semibold text-slate-500">Nota</span>
+                <textarea
+                  className="min-h-[90px] w-full resize-none rounded-xl border border-purple-200/60 bg-white px-3 py-2 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
+                  value={bulkNote}
+                  onChange={(e) => setBulkNote(e.target.value)}
+                  placeholder="(Opcional)"
+                  disabled={bulkSaving}
+                />
+              </label>
+            </>
+          ) : (
+            <div className="rounded-2xl bg-purple-50 px-3 py-2 text-sm text-slate-900 ring-1 ring-purple-200/60">
+              Se aprobarán todos los abonos <span className="font-extrabold">Pendientes</span> dentro del rango y quincena seleccionados.
+            </div>
+          )}
+
+          {error ? (
+            <div role="alert" className="rounded-xl border border-pink-200 bg-white px-3 py-2 text-sm text-slate-900">
+              {error}
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
+            <button
+              type="button"
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-4 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+              onClick={() => setBulkOpen(false)}
+              disabled={bulkSaving}
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+              Cancelar
+            </button>
+            <button
+              type="button"
+              disabled={bulkSaving}
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
+              onClick={handleBulkSave}
+            >
+              <Check className="h-4 w-4" aria-hidden="true" />
+              {bulkSaving ? 'Guardando…' : mode === 'admin' && bulkAction === 'approve' ? 'Aprobar masivo' : 'Guardar masivo'}
             </button>
           </div>
         </div>

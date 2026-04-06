@@ -27,6 +27,17 @@ export default defineConfig([
     },
   },
   {
+    files: ['api/**/*.js', 'scripts/**/*.{js,mjs}'],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.node,
+      parserOptions: {
+        ecmaVersion: 'latest',
+        sourceType: 'module',
+      },
+    },
+  },
+  {
     files: ['supabase/functions/**/*.js'],
     languageOptions: {
       ecmaVersion: 2020,
