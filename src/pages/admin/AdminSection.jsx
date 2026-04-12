@@ -2,6 +2,16 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Check, RefreshCw, X } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient.js'
 
+const BUCKET = import.meta.env.VITE_STORAGE_BUCKET || 'nati-app'
+
+function publicUrlFor(path) {
+  try {
+    return supabase.storage.from(BUCKET).getPublicUrl(path).data.publicUrl
+  } catch {
+    return ''
+  }
+}
+
 const copyBySection = {
   socios: {
     title: 'Gestionar Socios',
@@ -14,6 +24,10 @@ const copyBySection = {
   prestamos: {
     title: 'Gestionar Préstamos',
     description: 'Reglas del préstamo, solicitudes, aprobación/rechazo y seguimiento.',
+  },
+  intereses: {
+    title: 'Ganancia por Intereses',
+    description: 'Intereses acumulados de préstamos para liquidación final de socios.',
   },
   actividades: {
     title: 'Gestionar Actividades',
@@ -92,14 +106,26 @@ function AdminPrestamos({ title, description }) {
   const [loansError, setLoansError] = useState('')
   const [loans, setLoans] = useState([])
   const [profilesById, setProfilesById] = useState(() => new Map())
-  const [statusFilter, setStatusFilter] = useState('pending')
   const [actingId, setActingId] = useState(null)
+
+  const [paymentsLoading, setPaymentsLoading] = useState(true)
+  const [paymentsError, setPaymentsError] = useState('')
+  const [payments, setPayments] = useState([])
+  const [actingPaymentId, setActingPaymentId] = useState(null)
+
+  const [query, setQuery] = useState('')
 
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [confirmLoan, setConfirmLoan] = useState(null)
   const [confirmAction, setConfirmAction] = useState(null)
   const [confirmNote, setConfirmNote] = useState('')
   const [confirmError, setConfirmError] = useState('')
+
+  const [confirmPayOpen, setConfirmPayOpen] = useState(false)
+  const [confirmPay, setConfirmPay] = useState(null)
+  const [confirmPayAction, setConfirmPayAction] = useState(null)
+  const [confirmPayNote, setConfirmPayNote] = useState('')
+  const [confirmPayError, setConfirmPayError] = useState('')
 
   const loadSettings = useCallback(async () => {
     setSettingsLoading(true)
@@ -144,15 +170,12 @@ function AdminPrestamos({ title, description }) {
       )
       .order('created_at', { ascending: false })
 
-    if (statusFilter !== 'all') q = q.eq('status', statusFilter)
-
     const { data, error } = await q
 
     if (error) {
       const extra = [error.code, error.hint].filter(Boolean).join(' · ')
       setLoansError(extra ? `${error.message} (${extra})` : error.message)
       setLoans([])
-      setProfilesById(new Map())
       setLoansLoading(false)
       return
     }
@@ -162,7 +185,6 @@ function AdminPrestamos({ title, description }) {
 
     const ids = Array.from(new Set(list.map((l) => l.user_id).filter(Boolean)))
     if (!ids.length) {
-      setProfilesById(new Map())
       setLoansLoading(false)
       return
     }
@@ -173,26 +195,75 @@ function AdminPrestamos({ title, description }) {
       .in('user_id', ids)
 
     if (profilesError) {
-      setProfilesById(new Map())
       setLoansLoading(false)
       return
     }
 
-    const m = new Map()
-    for (const p of profiles ?? []) {
-      m.set(p.user_id, p)
-    }
-    setProfilesById(m)
+    setProfilesById((prev) => {
+      const m = new Map(prev)
+      for (const p of profiles ?? []) {
+        m.set(p.user_id, p)
+      }
+      return m
+    })
     setLoansLoading(false)
-  }, [statusFilter])
+  }, [])
+
+  const loadPayments = useCallback(async () => {
+    setPaymentsLoading(true)
+    setPaymentsError('')
+
+    let q = supabase
+      .from('prestamo_pagos')
+      .select(
+        'id, prestamo_id, socio_id, tipo, monto, capital_monto, interes_monto, fecha_pago, mes_correspondiente, comprobante_url, estado, comentarios, created_at',
+      )
+      .order('created_at', { ascending: false })
+
+    const { data, error } = await q
+    if (error) {
+      const extra = [error.code, error.hint].filter(Boolean).join(' · ')
+      setPaymentsError(extra ? `${error.message} (${extra})` : error.message)
+      setPayments([])
+      setPaymentsLoading(false)
+      return
+    }
+
+    const list = data ?? []
+    setPayments(list)
+
+    const ids = Array.from(new Set(list.map((p) => p.socio_id).filter(Boolean)))
+    if (!ids.length) {
+      setPaymentsLoading(false)
+      return
+    }
+
+    const { data: profiles, error: profilesError } = await supabase
+      .from('profiles')
+      .select('user_id, full_name, phone')
+      .in('user_id', ids)
+
+    if (!profilesError) {
+      setProfilesById((prev) => {
+        const m = new Map(prev)
+        for (const p of profiles ?? []) {
+          m.set(p.user_id, p)
+        }
+        return m
+      })
+    }
+
+    setPaymentsLoading(false)
+  }, [])
 
   useEffect(() => {
     const t = setTimeout(() => {
       loadSettings()
       loadLoans()
+      loadPayments()
     }, 0)
     return () => clearTimeout(t)
-  }, [loadLoans, loadSettings])
+  }, [loadLoans, loadPayments, loadSettings])
 
   async function saveSettings() {
     setSettingsError('')
@@ -203,8 +274,8 @@ function AdminPrestamos({ title, description }) {
       setSettingsError('El % de interés debe ser mayor a 0')
       return
     }
-    if (!Number.isFinite(mp) || mp <= 0 || mp > 100) {
-      setSettingsError('El tope máximo debe ser un % entre 1 y 100')
+    if (!Number.isFinite(mp) || mp <= 0) {
+      setSettingsError('El tope máximo debe ser mayor a 0')
       return
     }
 
@@ -245,6 +316,14 @@ function AdminPrestamos({ title, description }) {
     setConfirmLoan(loan ?? null)
     setConfirmNote('')
     setConfirmOpen(true)
+  }
+
+  function openConfirmPay(action, pay) {
+    setConfirmPayError('')
+    setConfirmPayAction(action)
+    setConfirmPay(pay ?? null)
+    setConfirmPayNote('')
+    setConfirmPayOpen(true)
   }
 
   async function decideLoan(id, nextStatus, decisionNote) {
@@ -289,6 +368,36 @@ function AdminPrestamos({ title, description }) {
     await loadLoans()
   }
 
+  async function decidePayment(id, nextStatus, decisionNote) {
+    setPaymentsError('')
+    if (!id) return
+    if (nextStatus !== 'approved' && nextStatus !== 'rejected') return
+
+    if (nextStatus === 'rejected') {
+      const msg = String(decisionNote ?? '').trim()
+      if (!msg) {
+        setConfirmPayError('Escribe el motivo del rechazo')
+        return
+      }
+    }
+
+    setActingPaymentId(id)
+    const payload = {
+      estado: nextStatus,
+      comentarios: String(decisionNote ?? '').trim() || null,
+    }
+    const { error } = await supabase.from('prestamo_pagos').update(payload).eq('id', id)
+    setActingPaymentId(null)
+
+    if (error) {
+      const extra = [error.code, error.hint].filter(Boolean).join(' · ')
+      setPaymentsError(extra ? `${error.message} (${extra})` : error.message)
+      return
+    }
+
+    await loadPayments()
+  }
+
   async function confirmDecision() {
     if (!confirmLoan?.id || !confirmAction) return
     setConfirmError('')
@@ -299,12 +408,100 @@ function AdminPrestamos({ title, description }) {
     setConfirmNote('')
   }
 
+  async function confirmPayDecision() {
+    if (!confirmPay?.id || !confirmPayAction) return
+    setConfirmPayError('')
+    await decidePayment(confirmPay.id, confirmPayAction, confirmPayNote)
+    setConfirmPayOpen(false)
+    setConfirmPay(null)
+    setConfirmPayAction(null)
+    setConfirmPayNote('')
+  }
+
   const totals = useMemo(() => {
     const pending = loans.filter((l) => l.status === 'pending').length
     const approved = loans.filter((l) => l.status === 'approved').length
     const rejected = loans.filter((l) => l.status === 'rejected').length
     return { pending, approved, rejected }
   }, [loans])
+
+  const filteredLoans = useMemo(() => {
+    const q = String(query || '').trim().toLowerCase()
+    if (!q) return loans
+    return loans.filter((l) => {
+      const p = profilesById.get(l.user_id)
+      const name = String(p?.full_name || '').toLowerCase()
+      const phone = String(p?.phone || '').toLowerCase()
+      const note = String(l.note || '').toLowerCase()
+      return name.includes(q) || phone.includes(q) || note.includes(q)
+    })
+  }, [loans, profilesById, query])
+
+  const loansByStatus = useMemo(() => {
+    const pending = []
+    const approved = []
+    const rejected = []
+    for (const l of filteredLoans) {
+      if (l.status === 'pending') pending.push(l)
+      else if (l.status === 'approved') approved.push(l)
+      else if (l.status === 'rejected') rejected.push(l)
+    }
+    return { pending, approved, rejected }
+  }, [filteredLoans])
+
+  const filteredPayments = useMemo(() => {
+    const q = String(query || '').trim().toLowerCase()
+    if (!q) return payments
+    return payments.filter((pmt) => {
+      const p = profilesById.get(pmt.socio_id)
+      const name = String(p?.full_name || '').toLowerCase()
+      const phone = String(p?.phone || '').toLowerCase()
+      const month = String(pmt.mes_correspondiente || '').toLowerCase()
+      const comments = String(pmt.comentarios || '').toLowerCase()
+      return name.includes(q) || phone.includes(q) || month.includes(q) || comments.includes(q)
+    })
+  }, [payments, profilesById, query])
+
+  const paymentsByStatus = useMemo(() => {
+    const pending = []
+    const approved = []
+    const rejected = []
+    for (const p of filteredPayments) {
+      if (p.estado === 'pending') pending.push(p)
+      else if (p.estado === 'approved') approved.push(p)
+      else if (p.estado === 'rejected') rejected.push(p)
+    }
+    return { pending, approved, rejected }
+  }, [filteredPayments])
+
+  const loanById = useMemo(() => {
+    const m = new Map()
+    for (const l of loans) m.set(l.id, l)
+    return m
+  }, [loans])
+
+  const paidCapitalByLoanId = useMemo(() => {
+    const m = new Map()
+    for (const p of payments) {
+      if (p.estado !== 'approved') continue
+      if (!p.prestamo_id) continue
+      const cap = Number(p.capital_monto ?? (p.tipo === 'total' || p.tipo === 'capital' ? p.monto : 0))
+      const prev = m.get(p.prestamo_id) || 0
+      m.set(p.prestamo_id, prev + (Number.isFinite(cap) ? cap : 0))
+    }
+    return m
+  }, [payments])
+
+  const liquidatedLoanIds = useMemo(() => {
+    const s = new Set()
+    for (const l of loans) {
+      if (l.status !== 'approved') continue
+      const paid = paidCapitalByLoanId.get(l.id) || 0
+      const principal = Number(l.amount)
+      if (Number.isFinite(principal) && paid >= principal) s.add(l.id)
+    }
+    return s
+  }, [loans, paidCapitalByLoanId])
 
   return (
     <div>
@@ -313,7 +510,7 @@ function AdminPrestamos({ title, description }) {
         <p className="mt-1 text-sm text-slate-500">{description}</p>
       </div>
 
-      <div className="grid gap-3 lg:grid-cols-3">
+      <div className="grid gap-3 lg:grid-cols-[360px_1fr]">
         <div className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-purple-200/50 lg:col-span-1">
           <div className="flex items-start justify-between gap-3">
             <div>
@@ -374,125 +571,291 @@ function AdminPrestamos({ title, description }) {
           </div>
         </div>
 
-        <div className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-purple-200/50 lg:col-span-2">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-bold text-slate-900">Solicitudes</div>
-              <div className="mt-1 text-sm text-slate-500">
-                Pendientes: {totals.pending} · Aprobadas: {totals.approved} · Rechazadas: {totals.rejected}
+        <div className="grid gap-3 xl:grid-cols-2">
+          <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-bold text-slate-900">Solicitudes</div>
+                <div className="mt-1 text-sm text-slate-500">
+                  Pendientes: {totals.pending} · Aprobadas: {totals.approved} · Rechazadas: {totals.rejected}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  className="h-10 w-60 rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:ring-4 focus:ring-purple-200"
+                  placeholder="Buscar (nombre/teléfono)…"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={loadLoans}
+                  className="grid h-10 w-10 place-items-center rounded-2xl border border-purple-200/60 bg-white text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                  aria-label="Actualizar solicitudes"
+                  title="Actualizar"
+                >
+                  <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                </button>
               </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <select
-                className="h-10 rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm outline-none transition focus:ring-4 focus:ring-purple-200"
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-              >
-                <option value="pending">Pendientes</option>
-                <option value="approved">Aprobadas</option>
-                <option value="rejected">Rechazadas</option>
-                <option value="all">Todas</option>
-              </select>
-              <button
-                type="button"
-                onClick={loadLoans}
-                className="grid h-10 w-10 place-items-center rounded-2xl border border-purple-200/60 bg-white text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
-                aria-label="Actualizar solicitudes"
-                title="Actualizar"
-              >
-                <RefreshCw className="h-4 w-4" aria-hidden="true" />
-              </button>
-            </div>
+
+            {loansError ? (
+              <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
+                {loansError}
+              </div>
+            ) : null}
+
+            {loansLoading ? (
+              <div className="mt-4 grid gap-2">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="h-14 animate-pulse rounded-2xl bg-purple-50 ring-1 ring-purple-200/60" />
+                ))}
+              </div>
+            ) : (
+              <div className="mt-4 grid gap-3">
+                {['pending', 'approved', 'rejected'].map((st) => {
+                  const list = loansByStatus[st]
+                  const label = st === 'pending' ? 'Pendientes' : st === 'approved' ? 'Aprobadas' : 'Rechazadas'
+                  return (
+                    <div key={st} className="rounded-3xl bg-purple-50 p-4 ring-1 ring-purple-200/60">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm font-extrabold text-slate-900">{label}</div>
+                        <div className="text-xs font-semibold text-slate-500">{list.length}</div>
+                      </div>
+
+                      {list.length ? (
+                        <div className="mt-3 grid max-h-[40vh] gap-2 overflow-auto pr-1">
+                          {list.map((l) => {
+                  const p = profilesById.get(l.user_id)
+                  const name = p?.full_name || 'Socio'
+                  const phone = p?.phone || '—'
+                  const createdAt = l.created_at
+                    ? new Date(l.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                    : '—'
+                  const savedRate = Number(l.interest_rate_percent)
+                  const savedRateLabel = Number.isFinite(savedRate) && savedRate > 0 ? `${savedRate}%` : '—'
+
+                  return (
+                    <div key={l.id} className="rounded-2xl border border-purple-200/50 bg-white px-3 py-3 shadow-sm">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-extrabold text-slate-900">
+                            {name} · {phone}
+                          </div>
+                          <div className="mt-0.5 text-xs font-semibold text-slate-500">
+                            {createdAt} · Interés: {savedRateLabel}
+                          </div>
+                          {l.note ? <div className="mt-2 text-sm text-slate-700">{l.note}</div> : null}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <div className="text-sm font-extrabold text-slate-900">{formatCop(l.amount)}</div>
+                          {liquidatedLoanIds.has(l.id) ? (
+                            <span className="rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 bg-purple-50 text-purple-700 ring-purple-200/70">
+                              Liquidado
+                            </span>
+                          ) : null}
+                          <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusPill(l.status)}`}>
+                            {l.status === 'approved'
+                              ? 'Aprobado'
+                              : l.status === 'pending'
+                              ? 'Pendiente'
+                              : l.status === 'rejected'
+                              ? 'Rechazado'
+                              : '—'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {l.status === 'pending' ? (
+                        <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            disabled={actingId === l.id}
+                            onClick={() => openConfirm('rejected', l)}
+                            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60"
+                          >
+                            <X className="h-4 w-4" aria-hidden="true" />
+                            Rechazar
+                          </button>
+                          <button
+                            type="button"
+                            disabled={actingId === l.id}
+                            onClick={() => openConfirm('approved', l)}
+                            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
+                          >
+                            <Check className="h-4 w-4" aria-hidden="true" />
+                            Aprobar
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  )
+                          })}
+                        </div>
+                      ) : (
+                        <div className="mt-3 rounded-2xl bg-white px-3 py-3 text-sm text-slate-700 ring-1 ring-purple-200/60">
+                          Sin registros.
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
 
-          {loansError ? (
-            <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
-              {loansError}
+          <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-bold text-slate-900">Pagos reportados</div>
+                <div className="mt-1 text-sm text-slate-500">Confirma intereses o liquidaciones (pago total).</div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={loadPayments}
+                  className="grid h-10 w-10 place-items-center rounded-2xl border border-purple-200/60 bg-white text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                  aria-label="Actualizar pagos"
+                  title="Actualizar"
+                >
+                  <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
             </div>
-          ) : null}
 
-          {loansLoading ? (
-            <div className="mt-4 grid gap-2">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <div key={i} className="h-14 animate-pulse rounded-2xl bg-purple-50 ring-1 ring-purple-200/60" />
-              ))}
-            </div>
-          ) : loans.length ? (
-            <div className="mt-4 grid gap-2">
-              {loans.map((l) => {
-                const p = profilesById.get(l.user_id)
-                const name = p?.full_name || 'Socio'
-                const phone = p?.phone || '—'
-                const createdAt = l.created_at
-                  ? new Date(l.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
-                  : '—'
-                const savedRate = Number(l.interest_rate_percent)
-                const savedRateLabel = Number.isFinite(savedRate) && savedRate > 0 ? `${savedRate}%` : '—'
+            {paymentsError ? (
+              <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
+                {paymentsError}
+              </div>
+            ) : null}
 
-                return (
-                  <div
-                    key={l.id}
-                    className="rounded-2xl border border-purple-200/50 bg-white px-3 py-3 shadow-sm"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-extrabold text-slate-900">
-                          {name} · {phone}
-                        </div>
-                        <div className="mt-0.5 text-xs font-semibold text-slate-500">
-                          {createdAt} · Interés aplicado: {savedRateLabel}
-                        </div>
-                        {l.note ? <div className="mt-2 text-sm text-slate-700">{l.note}</div> : null}
+            {paymentsLoading ? (
+              <div className="mt-4 grid gap-2">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="h-14 animate-pulse rounded-2xl bg-purple-50 ring-1 ring-purple-200/60" />
+                ))}
+              </div>
+            ) : (
+              <div className="mt-4 grid gap-3">
+                {['pending', 'approved', 'rejected'].map((st) => {
+                  const list = paymentsByStatus[st]
+                  const label = st === 'pending' ? 'Pendientes' : st === 'approved' ? 'Aprobados' : 'Rechazados'
+                  return (
+                    <div key={st} className="rounded-3xl bg-purple-50 p-4 ring-1 ring-purple-200/60">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm font-extrabold text-slate-900">{label}</div>
+                        <div className="text-xs font-semibold text-slate-500">{list.length}</div>
                       </div>
 
-                      <div className="flex items-center gap-2">
-                        <div className="text-sm font-extrabold text-slate-900">{formatCop(l.amount)}</div>
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusPill(l.status)}`}
-                        >
-                          {l.status === 'approved'
-                            ? 'Aprobado'
-                            : l.status === 'pending'
-                            ? 'Pendiente'
-                            : l.status === 'rejected'
-                            ? 'Rechazado'
-                            : '—'}
-                        </span>
+                      {list.length ? (
+                        <div className="mt-3 grid max-h-[40vh] gap-2 overflow-auto pr-1">
+                          {list.map((p) => {
+                  const profile = profilesById.get(p.socio_id)
+                  const name = profile?.full_name || 'Socio'
+                  const phone = profile?.phone || '—'
+                  const paidAt = p.fecha_pago
+                    ? new Date(p.fecha_pago).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                    : p.created_at
+                    ? new Date(p.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                    : '—'
+                  const loan = loanById.get(p.prestamo_id)
+                  const receiptUrl = p.comprobante_url ? publicUrlFor(p.comprobante_url) : ''
+
+                  return (
+                    <div key={p.id} className="rounded-2xl border border-purple-200/50 bg-white px-3 py-3 shadow-sm">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-extrabold text-slate-900">
+                            {name} · {phone}
+                          </div>
+                          <div className="mt-0.5 text-xs font-semibold text-slate-500">
+                            {paidAt}
+                            {loan?.amount ? ` · Préstamo: ${formatCop(loan.amount)}` : ''}
+                          </div>
+                          <div className="mt-2 text-sm text-slate-700">
+                            {p.tipo === 'interes'
+                              ? `Interés${p.mes_correspondiente ? ` (${p.mes_correspondiente})` : ''}`
+                              : p.tipo === 'total'
+                              ? 'Pago total (liquidación)'
+                              : p.tipo === 'capital'
+                              ? 'Capital'
+                              : 'Pago'}
+                          </div>
+                          <div className="mt-1 text-xs font-semibold text-slate-500">
+                            Capital: {formatCop(p.capital_monto ?? 0)} · Interés: {formatCop(p.interes_monto ?? 0)}
+                          </div>
+                          {p.comentarios ? (
+                            <div className="mt-1 text-xs font-semibold text-slate-500">{p.comentarios}</div>
+                          ) : null}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <div className="text-sm font-extrabold text-slate-900">{formatCop(p.monto)}</div>
+                          <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusPill(p.estado)}`}>
+                            {p.estado === 'approved'
+                              ? 'Aprobado'
+                              : p.estado === 'pending'
+                              ? 'Pendiente'
+                              : p.estado === 'rejected'
+                              ? 'Rechazado'
+                              : '—'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                        {receiptUrl ? (
+                          <a
+                            className="inline-flex h-10 items-center justify-center rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                            href={receiptUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Ver comprobante
+                          </a>
+                        ) : (
+                          <div className="text-xs font-semibold text-slate-500">Sin comprobante</div>
+                        )}
+
+                        {p.estado === 'pending' ? (
+                          <div className="flex flex-wrap items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              disabled={actingPaymentId === p.id}
+                              onClick={() => openConfirmPay('rejected', p)}
+                              className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60"
+                            >
+                              <X className="h-4 w-4" aria-hidden="true" />
+                              Rechazar
+                            </button>
+                            <button
+                              type="button"
+                              disabled={actingPaymentId === p.id}
+                              onClick={() => openConfirmPay('approved', p)}
+                              className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
+                            >
+                              <Check className="h-4 w-4" aria-hidden="true" />
+                              Aprobar
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
-
-                    {l.status === 'pending' ? (
-                      <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-                        <button
-                          type="button"
-                          disabled={actingId === l.id}
-                          onClick={() => openConfirm('rejected', l)}
-                          className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60"
-                        >
-                          <X className="h-4 w-4" aria-hidden="true" />
-                          Rechazar
-                        </button>
-                        <button
-                          type="button"
-                          disabled={actingId === l.id}
-                          onClick={() => openConfirm('approved', l)}
-                          className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
-                        >
-                          <Check className="h-4 w-4" aria-hidden="true" />
-                          Aprobar
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
-                )
-              })}
-            </div>
-          ) : (
-            <div className="mt-4 rounded-3xl bg-purple-50 p-5 ring-1 ring-purple-200/60">
-              <div className="text-sm font-bold text-slate-900">Sin solicitudes</div>
-              <div className="mt-1 text-sm text-slate-500">Aún no hay préstamos para mostrar con ese filtro.</div>
-            </div>
-          )}
+                  )
+                          })}
+                        </div>
+                      ) : (
+                        <div className="mt-3 rounded-2xl bg-white px-3 py-3 text-sm text-slate-700 ring-1 ring-purple-200/60">
+                          Sin registros.
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -561,6 +924,374 @@ function AdminPrestamos({ title, description }) {
           </div>
         </div>
       </Modal>
+
+      <Modal
+        open={confirmPayOpen}
+        title={confirmPayAction === 'rejected' ? 'Confirmar rechazo' : 'Confirmar aprobación'}
+        onClose={() => {
+          setConfirmPayOpen(false)
+          setConfirmPay(null)
+          setConfirmPayAction(null)
+          setConfirmPayNote('')
+          setConfirmPayError('')
+        }}
+      >
+        <div className="grid gap-4">
+          <div className="rounded-2xl bg-purple-50 px-3 py-2 ring-1 ring-purple-200/60">
+            <div className="text-xs font-semibold text-purple-700">Pago</div>
+            <div className="mt-1 text-sm font-extrabold text-slate-900">
+              {confirmPay?.monto ? formatCop(confirmPay.monto) : '—'}
+            </div>
+            <div className="mt-1 text-xs font-semibold text-slate-500">
+              {confirmPay?.tipo === 'interes'
+                ? `Interés${confirmPay?.mes_correspondiente ? ` (${confirmPay.mes_correspondiente})` : ''}`
+                : confirmPay?.tipo === 'total'
+                ? 'Pago total (liquidación)'
+                : 'Pago'}
+            </div>
+          </div>
+
+          {confirmPayAction === 'rejected' ? (
+            <label className="grid gap-2">
+              <span className="text-xs font-semibold text-slate-500">Motivo del rechazo</span>
+              <textarea
+                className="min-h-[110px] w-full resize-none rounded-xl border border-purple-200/60 bg-white px-3 py-2 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
+                value={confirmPayNote}
+                onChange={(e) => setConfirmPayNote(e.target.value)}
+                placeholder="Ej: comprobante ilegible, monto incorrecto, mes no corresponde, etc."
+              />
+            </label>
+          ) : null}
+
+          {confirmPayError ? (
+            <div role="alert" className="rounded-xl border border-pink-200 bg-white px-3 py-2 text-sm text-slate-900">
+              {confirmPayError}
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
+            <button
+              type="button"
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-4 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+              onClick={() => {
+                setConfirmPayOpen(false)
+                setConfirmPay(null)
+                setConfirmPayAction(null)
+                setConfirmPayNote('')
+                setConfirmPayError('')
+              }}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              disabled={actingPaymentId === confirmPay?.id}
+              className={[
+                'inline-flex h-11 items-center justify-center gap-2 rounded-2xl px-4 text-sm font-semibold text-white shadow-sm transition focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60',
+                confirmPayAction === 'rejected'
+                  ? 'bg-pink-600 hover:bg-pink-500 disabled:hover:bg-pink-600'
+                  : 'bg-purple-700 hover:bg-purple-500 disabled:hover:bg-purple-700',
+              ].join(' ')}
+              onClick={confirmPayDecision}
+            >
+              {confirmPayAction === 'rejected' ? 'Rechazar' : 'Aprobar'}
+            </button>
+          </div>
+        </div>
+      </Modal>
+    </div>
+  )
+}
+
+function AdminIntereses({ title, description }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [membersLoading, setMembersLoading] = useState(true)
+  const [membersError, setMembersError] = useState('')
+  const [members, setMembers] = useState([])
+  const [paymentsLoading, setPaymentsLoading] = useState(true)
+  const [paymentsError, setPaymentsError] = useState('')
+  const [payments, setPayments] = useState([])
+  const [profilesById, setProfilesById] = useState(() => new Map())
+  const [loansById, setLoansById] = useState(() => new Map())
+
+  const loadMembers = useCallback(async () => {
+    setMembersLoading(true)
+    setMembersError('')
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('user_id, full_name, phone, role, is_active')
+      .eq('is_active', true)
+      .order('full_name', { ascending: true })
+
+    if (error) {
+      const extra = [error.code, error.hint].filter(Boolean).join(' · ')
+      setMembersError(extra ? `${error.message} (${extra})` : error.message)
+      setMembers([])
+      setMembersLoading(false)
+      return
+    }
+
+    const list = data ?? []
+    setMembers(list)
+    setProfilesById((prev) => {
+      const m = new Map(prev)
+      for (const p of list) m.set(p.user_id, p)
+      return m
+    })
+    setMembersLoading(false)
+  }, [])
+
+  const loadInterestPayments = useCallback(async () => {
+    setPaymentsLoading(true)
+    setPaymentsError('')
+
+    const { data, error } = await supabase
+      .from('prestamo_pagos')
+      .select(
+        'id, prestamo_id, socio_id, tipo, monto, capital_monto, interes_monto, fecha_pago, mes_correspondiente, comprobante_url, estado, comentarios, created_at',
+      )
+      .eq('estado', 'approved')
+      .order('created_at', { ascending: false })
+
+    if (error) {
+      const extra = [error.code, error.hint].filter(Boolean).join(' · ')
+      setPaymentsError(extra ? `${error.message} (${extra})` : error.message)
+      setPayments([])
+      setPaymentsLoading(false)
+      return
+    }
+
+    const list = (data ?? []).filter((p) => Number(p.interes_monto ?? 0) > 0)
+    setPayments(list)
+
+    const userIds = Array.from(new Set(list.map((p) => p.socio_id).filter(Boolean)))
+    if (userIds.length) {
+      const { data: profiles } = await supabase
+        .from('profiles')
+        .select('user_id, full_name, phone')
+        .in('user_id', userIds)
+      setProfilesById((prev) => {
+        const m = new Map(prev)
+        for (const p of profiles ?? []) m.set(p.user_id, p)
+        return m
+      })
+    }
+
+    const loanIds = Array.from(new Set(list.map((p) => p.prestamo_id).filter(Boolean)))
+    if (loanIds.length) {
+      const { data: loans } = await supabase
+        .from('prestamos')
+        .select('id, amount, user_id')
+        .in('id', loanIds)
+      setLoansById(() => {
+        const m = new Map()
+        for (const l of loans ?? []) m.set(l.id, l)
+        return m
+      })
+    } else {
+      setLoansById(new Map())
+    }
+
+    setPaymentsLoading(false)
+  }, [])
+
+  const loadAll = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      await Promise.all([loadMembers(), loadInterestPayments()])
+    } catch (err) {
+      setError(err.message)
+    }
+    setLoading(false)
+  }, [loadInterestPayments, loadMembers])
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      loadAll()
+    }, 0)
+    return () => clearTimeout(t)
+  }, [loadAll])
+
+  const interestSummary = useMemo(() => {
+    let totalInterest = 0
+    const bySocio = new Map()
+
+    for (const p of payments) {
+      const interes = Number(p.interes_monto ?? 0)
+      totalInterest += Number.isFinite(interes) ? interes : 0
+      if (p.socio_id) {
+        const prev = bySocio.get(p.socio_id) || 0
+        bySocio.set(p.socio_id, prev + (Number.isFinite(interes) ? interes : 0))
+      }
+    }
+
+    return { totalInterest, bySocio }
+  }, [payments])
+
+  const interestSharePerMember = useMemo(() => {
+    const count = members.length || 0
+    if (!count) return 0
+    return interestSummary.totalInterest / count
+  }, [interestSummary.totalInterest, members.length])
+
+  return (
+    <div>
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+          <p className="mt-1 text-sm text-slate-500">{description}</p>
+        </div>
+        <button
+          type="button"
+          onClick={loadAll}
+          disabled={loading}
+          className="grid h-10 w-10 place-items-center rounded-2xl border border-purple-200/60 bg-white text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60"
+          aria-label="Actualizar"
+          title="Actualizar"
+        >
+          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
+        </button>
+      </div>
+
+      {error ? (
+        <div className="rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">{error}</div>
+      ) : null}
+
+      {membersError ? (
+        <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
+          {membersError}
+        </div>
+      ) : null}
+
+      {paymentsError ? (
+        <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
+          {paymentsError}
+        </div>
+      ) : null}
+
+      <div className="grid gap-3 lg:grid-cols-3">
+        <div className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-purple-200/50 lg:col-span-1">
+          <div className="text-sm font-bold text-slate-900">Resumen</div>
+          <div className="mt-4 grid gap-2 rounded-2xl bg-purple-50 px-4 py-3 ring-1 ring-purple-200/60">
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span className="font-semibold text-slate-500">Intereses aprobados acumulados</span>
+              <span className="font-extrabold text-slate-900">{formatCop(interestSummary.totalInterest)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span className="font-semibold text-slate-500">Socios activos</span>
+              <span className="font-extrabold text-slate-900">{membersLoading ? '—' : members.length}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span className="font-semibold text-slate-500">Ganancia por socio (proyección)</span>
+              <span className="font-extrabold text-purple-700">{formatCop(interestSharePerMember)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-purple-200/50 lg:col-span-2">
+          <div className="text-sm font-bold text-slate-900">Ganancia por socio</div>
+
+          {membersLoading || paymentsLoading ? (
+            <div className="mt-4 grid gap-2">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="h-12 animate-pulse rounded-2xl bg-purple-50 ring-1 ring-purple-200/60" />
+              ))}
+            </div>
+          ) : members.length ? (
+            <div className="mt-4 overflow-hidden rounded-2xl ring-1 ring-purple-200/60">
+              <table className="w-full border-collapse bg-white">
+                <thead className="bg-purple-50">
+                  <tr className="text-left text-xs font-extrabold text-slate-700">
+                    <th className="px-3 py-2">Socio</th>
+                    <th className="px-3 py-2">Intereses pagados</th>
+                    <th className="px-3 py-2">Ganancia asignada</th>
+                  </tr>
+                </thead>
+                <tbody className="text-sm text-slate-900">
+                  {members.map((m) => {
+                    const paidInterest = interestSummary.bySocio.get(m.user_id) || 0
+                    const label = m.full_name || m.phone || 'Socio'
+                    return (
+                      <tr key={m.user_id} className="border-t border-purple-100">
+                        <td className="px-3 py-2 font-semibold">{label}</td>
+                        <td className="px-3 py-2">{formatCop(paidInterest)}</td>
+                        <td className="px-3 py-2 font-extrabold text-purple-700">{formatCop(interestSharePerMember)}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="mt-4 rounded-3xl bg-purple-50 p-5 ring-1 ring-purple-200/60">
+              <div className="text-sm font-bold text-slate-900">Sin socios activos</div>
+              <div className="mt-1 text-sm text-slate-500">No hay socios activos para repartir intereses.</div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-3xl bg-white p-5 shadow-sm ring-1 ring-purple-200/50">
+        <div className="text-sm font-bold text-slate-900">Historial de intereses</div>
+
+        {paymentsLoading ? (
+          <div className="mt-4 grid gap-2">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="h-12 animate-pulse rounded-2xl bg-purple-50 ring-1 ring-purple-200/60" />
+            ))}
+          </div>
+        ) : payments.length ? (
+          <div className="mt-4 grid gap-2">
+            {payments.map((p) => {
+              const profile = profilesById.get(p.socio_id)
+              const name = profile?.full_name || profile?.phone || 'Socio'
+              const paidAt = p.fecha_pago
+                ? new Date(p.fecha_pago).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                : p.created_at
+                ? new Date(p.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                : '—'
+              const loan = loansById.get(p.prestamo_id)
+              const receiptUrl = p.comprobante_url ? publicUrlFor(p.comprobante_url) : ''
+
+              return (
+                <div key={p.id} className="rounded-2xl border border-purple-200/50 bg-white px-3 py-3 shadow-sm">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-extrabold text-slate-900">{name}</div>
+                      <div className="mt-0.5 text-xs font-semibold text-slate-500">
+                        {paidAt}
+                        {p.mes_correspondiente ? ` · ${p.mes_correspondiente}` : ''}
+                        {loan?.amount ? ` · Préstamo: ${formatCop(loan.amount)}` : ''}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="text-sm font-extrabold text-slate-900">{formatCop(p.interes_monto ?? 0)}</div>
+                      {receiptUrl ? (
+                        <a
+                          className="inline-flex h-10 items-center justify-center rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                          href={receiptUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Ver comprobante
+                        </a>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="mt-4 rounded-3xl bg-purple-50 p-5 ring-1 ring-purple-200/60">
+            <div className="text-sm font-bold text-slate-900">Sin intereses</div>
+            <div className="mt-1 text-sm text-slate-500">Aún no hay intereses aprobados.</div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -582,6 +1313,7 @@ export default function AdminSection({ section }) {
   }
 
   if (section === 'prestamos') return <AdminPrestamos title={copy.title} description={copy.description} />
+  if (section === 'intereses') return <AdminIntereses title={copy.title} description={copy.description} />
 
   return (
     <div>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, NavLink, Navigate, Outlet, useNavigate } from 'react-router-dom'
-import { HandCoins, Home, LogOut, Menu, Wallet, X } from 'lucide-react'
+import { CalendarDays, HandCoins, Home, LogOut, Menu, Wallet, X } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient.js'
 
 function getInitials(name, fallback) {
@@ -215,6 +215,9 @@ export default function SocioLayout() {
             <NavItem to="/socio/abonos" icon={<Wallet className="h-4 w-4" aria-hidden="true" />} onNavigate={onNavigate}>
               Abonos
             </NavItem>
+            <NavItem to="/socio/actividades" icon={<CalendarDays className="h-4 w-4" aria-hidden="true" />} onNavigate={onNavigate}>
+              Actividades
+            </NavItem>
             <NavItem to="/socio/prestamos" icon={<HandCoins className="h-4 w-4" aria-hidden="true" />} onNavigate={onNavigate}>
               Solicitud de préstamos
             </NavItem>
@@ -236,7 +239,7 @@ export default function SocioLayout() {
       </aside>
 
       <header className="sticky top-0 z-10 border-b border-purple-200/50 bg-white/90 px-4 py-3 backdrop-blur md:hidden">
-        <div className="mx-auto flex w-full max-w-5xl items-center justify-between">
+        <div className="mx-auto flex w-full max-w-7xl items-center justify-between">
           <button
             type="button"
             aria-label="Abrir menú"
@@ -265,7 +268,7 @@ export default function SocioLayout() {
       </header>
 
       <main className="px-4 py-6 md:px-8 md:py-8">
-        <div className="mx-auto w-full max-w-5xl">
+        <div className="mx-auto w-full max-w-7xl">
           <div className="mb-5 hidden items-center justify-end md:flex">
             <Link
               to="/socio"
@@ -282,4 +285,3 @@ export default function SocioLayout() {
     </div>
   )
 }
-

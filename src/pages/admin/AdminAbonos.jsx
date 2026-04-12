@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Users } from 'lucide-react'
+import { Search, Users } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient.js'
 import AbonosGrid from '../../components/AbonosGrid.jsx'
 
@@ -8,11 +8,22 @@ export default function AdminAbonos() {
   const [error, setError] = useState('')
   const [people, setPeople] = useState([])
   const [selectedUserId, setSelectedUserId] = useState('')
+  const [query, setQuery] = useState('')
 
   const selected = useMemo(
     () => people.find((s) => s.user_id === selectedUserId) ?? null,
     [people, selectedUserId],
   )
+
+  const filteredPeople = useMemo(() => {
+    const q = String(query || '').trim().toLowerCase()
+    if (!q) return people
+    return people.filter((p) => {
+      const name = String(p.full_name || '').toLowerCase()
+      const phone = String(p.phone || '').toLowerCase()
+      return name.includes(q) || phone.includes(q)
+    })
+  }, [people, query])
 
   useEffect(() => {
     let active = true
@@ -97,43 +108,80 @@ export default function AdminAbonos() {
         </p>
       </div>
 
-      <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50">
-        <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-center">
-          <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-            <Users className="h-4 w-4 text-purple-700" aria-hidden="true" />
-            Persona
-          </div>
-          <select
-            className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
-            value={selectedUserId}
-            onChange={(e) => setSelectedUserId(e.target.value)}
-            disabled={loading}
-          >
-            {people.map((s) => (
-              <option key={s.user_id} value={s.user_id}>
-                {(s.full_name || 'Sin nombre') + ' — ' + (s.phone ?? '—')}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {selected ? (
-          <div className="mt-3 text-xs font-semibold text-slate-500">
-            Seleccionado:{' '}
-            <span className="text-slate-900">
-              {selected.full_name || 'Sin nombre'} ({selected.phone})
-            </span>
-          </div>
-        ) : null}
-      </div>
-
       {error ? (
         <div role="alert" className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
           {error}
         </div>
       ) : null}
 
-      {selectedUserId ? <div className="mt-3"><AbonosGrid mode="admin" userId={selectedUserId} /></div> : null}
+      <div className="mt-3 grid gap-3 lg:grid-cols-[320px_1fr]">
+        <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <Users className="h-4 w-4 text-purple-700" aria-hidden="true" />
+              Personas
+            </div>
+            {selected ? (
+              <div className="text-xs font-semibold text-slate-500">
+                <span className="text-slate-900">{selected.full_name || 'Sin nombre'}</span>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="mt-3">
+            <div className="flex items-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-3 py-2 shadow-sm focus-within:ring-4 focus-within:ring-purple-200">
+              <Search className="h-4 w-4 text-purple-700" aria-hidden="true" />
+              <input
+                className="h-7 w-full bg-transparent text-sm outline-none"
+                placeholder="Buscar por nombre o teléfono…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                disabled={loading}
+              />
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="mt-4 grid gap-2">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <div key={i} className="h-11 animate-pulse rounded-2xl bg-purple-50 ring-1 ring-purple-200/60" />
+              ))}
+            </div>
+          ) : filteredPeople.length ? (
+            <div className="mt-4 max-h-[70vh] overflow-auto pr-1">
+              <div className="grid gap-2">
+                {filteredPeople.map((p) => {
+                  const isActive = p.user_id === selectedUserId
+                  return (
+                    <button
+                      key={p.user_id}
+                      type="button"
+                      onClick={() => setSelectedUserId(p.user_id)}
+                      className={[
+                        'w-full rounded-2xl border px-3 py-2 text-left shadow-sm transition focus:outline-none focus:ring-4 focus:ring-purple-200',
+                        isActive
+                          ? 'border-purple-300 bg-purple-50'
+                          : 'border-purple-200/60 bg-white hover:bg-purple-50',
+                      ].join(' ')}
+                    >
+                      <div className="truncate text-sm font-extrabold text-slate-900">{p.full_name || 'Sin nombre'}</div>
+                      <div className="mt-0.5 text-xs font-semibold text-slate-500">{p.phone ?? '—'}</div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-4 rounded-2xl bg-purple-50 px-3 py-3 text-sm text-slate-700 ring-1 ring-purple-200/60">
+              No hay resultados con ese filtro.
+            </div>
+          )}
+        </div>
+
+        <div>
+          {selectedUserId ? <AbonosGrid mode="admin" userId={selectedUserId} /> : null}
+        </div>
+      </div>
     </div>
   )
 }

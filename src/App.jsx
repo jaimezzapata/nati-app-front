@@ -8,9 +8,11 @@ import AdminSection from './pages/admin/AdminSection.jsx'
 import AdminProfile from './pages/admin/AdminProfile.jsx'
 import AdminSocios from './pages/admin/AdminSocios.jsx'
 import AdminAbonos from './pages/admin/AdminAbonos.jsx'
+import AdminActividades from './pages/admin/AdminActividades.jsx'
 import Abonos from './pages/Abonos.jsx'
 import SocioLayout from './layouts/SocioLayout.jsx'
 import SocioAbonos from './pages/socio/SocioAbonos.jsx'
+import SocioActividades from './pages/socio/SocioActividades.jsx'
 import SocioPrestamos from './pages/socio/SocioPrestamos.jsx'
 
 function App() {
@@ -26,12 +28,14 @@ function App() {
           <Route path="socios" element={<AdminSocios />} />
           <Route path="abonos" element={<AdminAbonos />} />
           <Route path="prestamos" element={<AdminSection section="prestamos" />} />
-          <Route path="actividades" element={<AdminSection section="actividades" />} />
+          <Route path="intereses" element={<AdminSection section="intereses" />} />
+          <Route path="actividades" element={<AdminActividades />} />
           <Route path="perfil" element={<AdminProfile />} />
         </Route>
         <Route path="/socio" element={<SocioLayout />}>
           <Route index element={<Navigate to="/socio/abonos" replace />} />
           <Route path="abonos" element={<SocioAbonos />} />
+          <Route path="actividades" element={<SocioActividades />} />
           <Route path="prestamos" element={<SocioPrestamos />} />
         </Route>
       </Route>

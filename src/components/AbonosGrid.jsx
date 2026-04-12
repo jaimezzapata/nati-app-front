@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Check, Layers, Pencil, RefreshCw, Send, X } from 'lucide-react'
+import { Check, Layers, Paperclip, Pencil, RefreshCw, Send, X } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient.js'
 
 function isoDate(date) {
@@ -37,6 +37,23 @@ function datetimeLocalToIso(value) {
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return null
   return d.toISOString()
+}
+
+function guessExtFromName(name) {
+  const n = String(name ?? '')
+  const idx = n.lastIndexOf('.')
+  if (idx === -1) return 'jpg'
+  return n.slice(idx + 1).toLowerCase() || 'jpg'
+}
+
+const BUCKET = import.meta.env.VITE_STORAGE_BUCKET || 'nati-app'
+
+function publicUrlFor(path) {
+  try {
+    return supabase.storage.from(BUCKET).getPublicUrl(path).data.publicUrl
+  } catch {
+    return ''
+  }
 }
 
 function getPeriodMonths(now = new Date()) {
@@ -120,6 +137,7 @@ export default function AbonosGrid({ mode, userId }) {
   const [note, setNote] = useState('')
   const [status, setStatus] = useState('pending')
   const [paidAt, setPaidAt] = useState('')
+  const [files, setFiles] = useState([])
 
   const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkFrom, setBulkFrom] = useState('')
@@ -129,6 +147,7 @@ export default function AbonosGrid({ mode, userId }) {
   const [bulkAmount, setBulkAmount] = useState('')
   const [bulkNote, setBulkNote] = useState('')
   const [bulkPaidAt, setBulkPaidAt] = useState(toDatetimeLocal(new Date().toISOString()))
+  const [bulkFiles, setBulkFiles] = useState([])
   const [bulkStatus, setBulkStatus] = useState('approved')
   const [bulkSaving, setBulkSaving] = useState(false)
 
@@ -184,7 +203,7 @@ export default function AbonosGrid({ mode, userId }) {
 
     const first = await supabase
       .from('abonos')
-      .select('id, user_id, period_date, quincena, amount, status, note, created_at, created_by, paid_at')
+      .select('id, user_id, period_date, quincena, amount, status, note, created_at, created_by, paid_at, support_paths')
       .eq('user_id', userId)
       .gte('period_date', from)
       .lte('period_date', to)
@@ -192,7 +211,7 @@ export default function AbonosGrid({ mode, userId }) {
       .order('quincena', { ascending: true })
 
     if (first.error) {
-      if (first.error.code === '42703' && String(first.error.message ?? '').includes('paid_at')) {
+      if (first.error.code === '42703' && (String(first.error.message ?? '').includes('paid_at') || String(first.error.message ?? '').includes('support_paths'))) {
         const second = await supabase
           .from('abonos')
           .select('id, user_id, period_date, quincena, amount, status, note, created_at, created_by')
@@ -263,6 +282,7 @@ export default function AbonosGrid({ mode, userId }) {
     setAmount(existing?.amount ? String(existing.amount) : '')
     setNote(existing?.note ?? '')
     setPaidAt(toDatetimeLocal(existing?.paid_at || existing?.created_at || new Date().toISOString()))
+    setFiles([])
     if (mode === 'admin') setStatus(existing?.status ?? 'approved')
     else setStatus('pending')
     setModalOpen(true)
@@ -299,18 +319,36 @@ export default function AbonosGrid({ mode, userId }) {
       return
     }
 
+    const targetUserId = mode === 'admin' ? userId : session.user.id
+
     setSaving(true)
 
     const paidIso = datetimeLocalToIso(paidAt) || new Date().toISOString()
+    let supportPaths = Array.isArray(modalCell.existing?.support_paths) ? modalCell.existing.support_paths : []
+
+    if (files.length) {
+      for (const f of files) {
+        const ext = guessExtFromName(f.name)
+        const path = `abonos/${targetUserId}/${modalCell.month.periodDate}/q${modalCell.quincena}/${Date.now()}-${Math.random().toString(16).slice(2)}.${ext}`
+        const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, f, { upsert: false, contentType: f.type || undefined })
+        if (upErr) {
+          setSaving(false)
+          setError(upErr.message)
+          return
+        }
+        supportPaths = [...supportPaths, path]
+      }
+    }
+
     const payload = {
-      user_id: userId,
+      user_id: targetUserId,
       period_date: modalCell.month.periodDate,
       quincena: modalCell.quincena,
       amount: numeric,
       note: String(note ?? '').trim() || null,
       status: mode === 'admin' ? status : 'pending',
-      created_by: session.user.id,
       paid_at: paidIso,
+      support_paths: supportPaths.length ? supportPaths : null,
     }
 
     const shouldInsert =
@@ -325,6 +363,7 @@ export default function AbonosGrid({ mode, userId }) {
           note: payload.note,
           status: payload.status,
           paid_at: payload.paid_at,
+          support_paths: payload.support_paths,
         })
         .eq('id', modalCell.existing.id)
 
@@ -335,21 +374,39 @@ export default function AbonosGrid({ mode, userId }) {
         return
       }
     } else {
-      const { error: insertError } = await supabase.from('abonos').insert(payload)
-      setSaving(false)
+      if (mode !== 'admin') {
+        const { error: rpcError } = await supabase.rpc('create_abono_request', {
+          p_period_date: payload.period_date,
+          p_quincena: payload.quincena,
+          p_amount: payload.amount,
+          p_note: payload.note,
+          p_paid_at: payload.paid_at,
+          p_support_paths: payload.support_paths,
+        })
+        setSaving(false)
 
-      if (insertError) {
-        if (insertError.code === '23505') {
-          setError(
-            'No se pudo guardar el historial porque la base de datos no permite múltiples intentos para el mismo periodo/quincena. Hay que ajustar la restricción UNIQUE para conservar historial.',
-          )
+        if (rpcError) {
+          const extra = [rpcError.code, rpcError.details, rpcError.hint].filter(Boolean).join(' · ')
+          setError(extra ? `${rpcError.message} (${extra})` : rpcError.message)
           return
         }
-        setError(insertError.message)
-        return
+      } else {
+        const { error: insertError } = await supabase.from('abonos').insert(payload)
+        setSaving(false)
+
+        if (insertError) {
+          if (insertError.code === '23505') {
+            setError(
+              'No se pudo guardar el historial porque la base de datos no permite múltiples intentos para el mismo periodo/quincena. Hay que ajustar la restricción UNIQUE para conservar historial.',
+            )
+            return
+          }
+          const extra = [insertError.code, insertError.details, insertError.hint].filter(Boolean).join(' · ')
+          setError(extra ? `${insertError.message} (${extra})` : insertError.message)
+          return
+        }
       }
     }
-
     setModalOpen(false)
     await load()
   }
@@ -365,6 +422,7 @@ export default function AbonosGrid({ mode, userId }) {
     setBulkAmount('')
     setBulkNote('')
     setBulkPaidAt(toDatetimeLocal(new Date().toISOString()))
+    setBulkFiles([])
     setBulkStatus('approved')
     setBulkOpen(true)
   }
@@ -446,6 +504,22 @@ export default function AbonosGrid({ mode, userId }) {
 
     const paidIso = datetimeLocalToIso(bulkPaidAt) || new Date().toISOString()
     const desiredStatus = mode === 'admin' ? bulkStatus : 'pending'
+    const targetUserId = mode === 'admin' ? userId : session.user.id
+
+    let sharedSupportPaths = []
+    if (bulkFiles.length) {
+      for (const f of bulkFiles) {
+        const ext = guessExtFromName(f.name)
+        const path = `abonos/${targetUserId}/bulk/${Date.now()}-${Math.random().toString(16).slice(2)}.${ext}`
+        const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, f, { upsert: false, contentType: f.type || undefined })
+        if (upErr) {
+          setBulkSaving(false)
+          setError(upErr.message)
+          return
+        }
+        sharedSupportPaths = [...sharedSupportPaths, path]
+      }
+    }
 
     const payloads = []
     for (const m of selectedMonths) {
@@ -457,14 +531,14 @@ export default function AbonosGrid({ mode, userId }) {
         if (existing?.status === 'pending' || existing?.status === 'approved') continue
 
         payloads.push({
-          user_id: userId,
+          user_id: targetUserId,
           period_date: m.periodDate,
           quincena: q,
           amount: numeric,
           note: String(bulkNote ?? '').trim() || null,
           status: desiredStatus,
-          created_by: session.user.id,
           paid_at: paidIso,
+          support_paths: sharedSupportPaths.length ? sharedSupportPaths : null,
         })
       }
     }
@@ -475,18 +549,39 @@ export default function AbonosGrid({ mode, userId }) {
     }
 
     setBulkSaving(true)
-    const { error: insertError } = await supabase.from('abonos').insert(payloads)
-    setBulkSaving(false)
+    if (mode !== 'admin') {
+      for (const p of payloads) {
+        const { error: rpcError } = await supabase.rpc('create_abono_request', {
+          p_period_date: p.period_date,
+          p_quincena: p.quincena,
+          p_amount: p.amount,
+          p_note: p.note,
+          p_paid_at: p.paid_at,
+          p_support_paths: p.support_paths,
+        })
+        if (rpcError) {
+          setBulkSaving(false)
+          const extra = [rpcError.code, rpcError.details, rpcError.hint].filter(Boolean).join(' · ')
+          setError(extra ? `${rpcError.message} (${extra})` : rpcError.message)
+          return
+        }
+      }
+      setBulkSaving(false)
+    } else {
+      const { error: insertError } = await supabase.from('abonos').insert(payloads)
+      setBulkSaving(false)
 
-    if (insertError) {
-      if (insertError.code === '23505') {
-        setError(
-          'No se pudo guardar el aporte masivo porque la base de datos no permite múltiples intentos para el mismo periodo/quincena. Hay que ajustar la restricción UNIQUE para conservar historial.',
-        )
+      if (insertError) {
+        if (insertError.code === '23505') {
+          setError(
+            'No se pudo guardar el aporte masivo porque la base de datos no permite múltiples intentos para el mismo periodo/quincena. Hay que ajustar la restricción UNIQUE para conservar historial.',
+          )
+          return
+        }
+        const extra = [insertError.code, insertError.details, insertError.hint].filter(Boolean).join(' · ')
+        setError(extra ? `${insertError.message} (${extra})` : insertError.message)
         return
       }
-      setError(insertError.message)
-      return
     }
 
     setBulkOpen(false)
@@ -658,6 +753,7 @@ export default function AbonosGrid({ mode, userId }) {
                     const when = whenValue
                       ? new Date(whenValue).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
                       : '—'
+                    const paths = Array.isArray(h?.support_paths) ? h.support_paths : []
                     return (
                       <div
                         key={h.id ?? `${h.period_date}|${h.quincena}|${h.created_at ?? ''}`}
@@ -670,6 +766,36 @@ export default function AbonosGrid({ mode, userId }) {
                           <div className="mt-0.5 text-xs font-semibold text-slate-500">{when}</div>
                           {h?.note ? (
                             <div className="mt-1 break-words text-xs text-slate-700">{h.note}</div>
+                          ) : null}
+                          {paths.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {paths.map((p) => {
+                                const url = publicUrlFor(p)
+                                const ext = guessExtFromName(p)
+                                const isImage = ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext)
+                                return (
+                                  <a
+                                    key={p}
+                                    href={url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="group relative block h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-purple-200/60 bg-white"
+                                  >
+                                    {isImage ? (
+                                      <img
+                                        src={url}
+                                        alt="Soporte"
+                                        className="h-full w-full object-cover transition group-hover:scale-110"
+                                      />
+                                    ) : (
+                                      <div className="flex h-full w-full items-center justify-center bg-purple-100 text-[10px] font-bold uppercase text-purple-700">
+                                        {ext}
+                                      </div>
+                                    )}
+                                  </a>
+                                )
+                              })}
+                            </div>
                           ) : null}
                         </div>
                         <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusPill(h?.status)}`}>
@@ -695,6 +821,18 @@ export default function AbonosGrid({ mode, userId }) {
               type="datetime-local"
               value={paidAt}
               onChange={(e) => setPaidAt(e.target.value)}
+              disabled={mode !== 'admin' && modalCell?.existing?.status && modalCell.existing.status !== 'rejected'}
+            />
+          </label>
+
+          <label className="grid gap-2">
+            <span className="text-xs font-semibold text-slate-500">Soporte (pantallazo)</span>
+            <input
+              className="block w-full text-sm text-slate-900 file:mr-3 file:rounded-xl file:border-0 file:bg-white file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-900 file:shadow-sm file:ring-1 file:ring-purple-200/60"
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
               disabled={mode !== 'admin' && modalCell?.existing?.status && modalCell.existing.status !== 'rejected'}
             />
           </label>
@@ -873,6 +1011,18 @@ export default function AbonosGrid({ mode, userId }) {
                   type="datetime-local"
                   value={bulkPaidAt}
                   onChange={(e) => setBulkPaidAt(e.target.value)}
+                  disabled={bulkSaving}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-xs font-semibold text-slate-500">Soporte (pantallazo)</span>
+                <input
+                  className="block w-full text-sm text-slate-900 file:mr-3 file:rounded-xl file:border-0 file:bg-white file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-900 file:shadow-sm file:ring-1 file:ring-purple-200/60"
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  onChange={(e) => setBulkFiles(Array.from(e.target.files ?? []))}
                   disabled={bulkSaving}
                 />
               </label>

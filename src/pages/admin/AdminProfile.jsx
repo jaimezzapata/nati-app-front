@@ -15,6 +15,11 @@ export default function AdminProfile() {
   const [dangerError, setDangerError] = useState('')
   const [dangerSuccess, setDangerSuccess] = useState('')
 
+  const [cleanUserPhone, setCleanUserPhone] = useState('3246720301')
+  const [cleanUserLoading, setCleanUserLoading] = useState(false)
+  const [cleanUserError, setCleanUserError] = useState('')
+  const [cleanUserSuccess, setCleanUserSuccess] = useState('')
+
   const showDangerZone = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DANGER_ZONE !== 'false'
 
   useEffect(() => {
@@ -105,34 +110,58 @@ export default function AdminProfile() {
     setSuccess('Perfil actualizado')
   }
 
-  async function runDangerReset() {
+  async function runDangerZone() {
     setDangerError('')
     setDangerSuccess('')
 
-    if (String(dangerConfirm).trim().toUpperCase() !== 'ELIMINAR') {
-      setDangerError('Escribe ELIMINAR para confirmar')
+    if (dangerConfirm !== 'ELIMINAR') {
+      setDangerError('Debes escribir ELIMINAR en mayúsculas para confirmar')
       return
     }
 
-    const typed = String(dangerPhone ?? '').replace(/\D/g, '').slice(0, 10)
-    if (typed.length !== 10) {
-      setDangerError('Ingresa el teléfono del admin (10 dígitos)')
+    const typedAdmin = String(dangerPhone ?? '').replace(/\D/g, '').slice(0, 10)
+    if (typedAdmin.length !== 10) {
+      setDangerError('Ingresa tu teléfono de admin (10 dígitos)')
       return
     }
 
     setDangerLoading(true)
     try {
-      const { data, error: rpcError } = await supabase.rpc('danger_reset_keep_admin', { admin_phone: typed })
+      const { data, error: rpcError } = await supabase.rpc('danger_reset_keep_admin', { admin_phone: typedAdmin })
       if (rpcError) throw rpcError
+      
       setDangerLoading(false)
-      const summary = data?.deleted
-        ? `Limpieza completada. Borrados: ${data.deleted}`
+      const summary = data?.deleted_rows_public !== undefined 
+        ? `Limpieza completada. Filas borradas (public): ${data.deleted_rows_public}`
         : 'Limpieza completada'
       setDangerSuccess(summary)
       setDangerConfirm('')
     } catch (e) {
       setDangerLoading(false)
       setDangerError(String(e?.message ?? e))
+    }
+  }
+
+  async function runCleanUser() {
+    setCleanUserError('')
+    setCleanUserSuccess('')
+
+    const typed = String(cleanUserPhone ?? '').replace(/\D/g, '').slice(0, 10)
+    if (typed.length !== 10) {
+      setCleanUserError('Ingresa el teléfono del socio (10 dígitos)')
+      return
+    }
+
+    setCleanUserLoading(true)
+    try {
+      const { data, error: rpcError } = await supabase.rpc('danger_clean_user_data', { target_phone: typed })
+      if (rpcError) throw rpcError
+      setCleanUserLoading(false)
+      const summary = `Datos limpiados. Abonos: ${data?.abonos ?? 0}, Actividades: ${data?.actividades ?? 0}, Préstamos: ${data?.prestamos ?? 0}`
+      setCleanUserSuccess(summary)
+    } catch (e) {
+      setCleanUserLoading(false)
+      setCleanUserError(String(e?.message ?? e))
     }
   }
 
@@ -214,8 +243,49 @@ export default function AdminProfile() {
       </form>
 
       {showDangerZone ? (
-        <div className="mt-3 rounded-3xl bg-white p-5 shadow-sm ring-1 ring-pink-200/70">
-          <div className="text-sm font-bold text-slate-900">DangerZone</div>
+        <>
+          <div className="mt-3 grid gap-3 rounded-3xl bg-white p-5 shadow-sm ring-1 ring-pink-200/70">
+            <div className="text-sm font-bold text-slate-900">DangerZone: Limpiar un solo usuario</div>
+            <div className="text-sm text-slate-500">
+              Borra solo abonos, préstamos y actividades de un socio específico (no borra su cuenta).
+            </div>
+
+            <label className="grid gap-2">
+              <span className="text-xs font-medium text-slate-500">Teléfono del socio</span>
+              <input
+                className="h-11 w-full rounded-xl border border-pink-200/70 bg-white px-3 text-sm outline-none transition focus:border-pink-500 focus:ring-4 focus:ring-pink-200"
+                value={cleanUserPhone}
+                onChange={(e) => setCleanUserPhone(e.target.value)}
+                placeholder="3246720301"
+                inputMode="numeric"
+              />
+            </label>
+
+            {cleanUserError ? (
+              <div role="alert" className="rounded-xl border border-pink-200 bg-white px-3 py-2 text-sm text-slate-900">
+                {cleanUserError}
+              </div>
+            ) : null}
+
+            {cleanUserSuccess ? (
+              <div className="rounded-xl border border-purple-200 bg-purple-100 px-3 py-2 text-sm font-semibold text-purple-700">
+                {cleanUserSuccess}
+              </div>
+            ) : null}
+
+            <button
+              type="button"
+              disabled={cleanUserLoading}
+              onClick={runCleanUser}
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-pink-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-pink-500 focus:outline-none focus:ring-4 focus:ring-pink-200 disabled:opacity-60 disabled:hover:bg-pink-600"
+            >
+              <Trash2 className="h-4 w-4" aria-hidden="true" />
+              {cleanUserLoading ? 'Borrando datos del usuario…' : 'Limpiar datos del usuario'}
+            </button>
+          </div>
+
+          <div className="mt-3 rounded-3xl bg-white p-5 shadow-sm ring-1 ring-pink-200/70">
+            <div className="text-sm font-bold text-slate-900">DangerZone: Reset Completo</div>
           <div className="mt-1 text-sm text-slate-500">
             Limpia usuarios y datos relacionados en Supabase (solo desarrollo).
           </div>
@@ -235,13 +305,13 @@ export default function AdminProfile() {
 
             <label className="grid gap-2">
               <span className="text-xs font-medium text-slate-500">
-                Teléfono del admin
+                Tu teléfono (Admin a conservar)
               </span>
               <input
                 className="h-11 w-full rounded-xl border border-pink-200/70 bg-white px-3 text-sm outline-none transition focus:border-pink-500 focus:ring-4 focus:ring-pink-200"
                 value={dangerPhone}
                 onChange={(e) => setDangerPhone(e.target.value)}
-                placeholder="3006454441"
+                placeholder="Ej: 3001234567"
                 inputMode="numeric"
               />
             </label>
@@ -259,16 +329,17 @@ export default function AdminProfile() {
             ) : null}
 
             <button
-              type="button"
-              disabled={dangerLoading}
-              onClick={runDangerReset}
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-pink-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-pink-500 focus:outline-none focus:ring-4 focus:ring-pink-200 disabled:opacity-60 disabled:hover:bg-pink-600"
-            >
-              <Trash2 className="h-4 w-4" aria-hidden="true" />
-              {dangerLoading ? 'Eliminando…' : 'Limpiar datos'}
-            </button>
+                type="button"
+                disabled={dangerLoading}
+                onClick={runDangerZone}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-pink-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-pink-500 focus:outline-none focus:ring-4 focus:ring-pink-200 disabled:opacity-60 disabled:hover:bg-pink-600"
+              >
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+                {dangerLoading ? 'Ejecutando limpieza…' : 'Ejecutar DangerZone'}
+              </button>
+            </div>
           </div>
-        </div>
+        </>
       ) : null}
     </div>
   )
