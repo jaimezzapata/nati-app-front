@@ -28,7 +28,10 @@
   - `profiles`: datos del usuario dentro de la app (rol, phone, nombre, sexo, activo).
   - `abonos`: registros por mes/quincena (con historial y estados).
   - `prestamos`: solicitudes y estado, con snapshot del interés al crear.
+  - `prestamo_pagos`: pagos reportados de préstamos (interés mensual, capital o total) con aprobación del admin.
   - `loan_settings`: configuración global (interés y tope % de préstamo).
+  - `activities`: actividades creadas por admin (rifas/algos/comidas/otros), con inversión/presupuesto y estado (activa/cerrada).
+  - `activity_contributions`: aportes de socios a actividades (múltiples aportes permitidos), con soportes y aprobación del admin.
   - `natilleras`, `natillera_members`: estructura base para ciclo/membresía.
 - RLS:
   - Propietario: ve su información (`user_id = auth.uid()`).
@@ -60,6 +63,7 @@
 - Dashboard admin (datos reales):
   - conteos desde `profiles` y `prestamos`.
   - agregados por mes desde `abonos` aprobados.
+  - total ahorrado mostrado: suma de abonos aprobados menos inversión de actividades activas (UI).
 
 ## Seguridad operacional (entorno dev)
 - “DangerZone” solo visible en desarrollo (Vite dev).
@@ -73,3 +77,23 @@
   - `lib/`: cliente Supabase.
 - `scripts/`: utilidades Node (seed y mantenimiento).
 - `vercel.json`: rewrite SPA para rutas.
+
+## Reglas de negocio (MVP)
+
+### Préstamos
+- La solicitud guarda `interest_rate_percent` como snapshot.
+- El socio puede reportar pagos en `prestamo_pagos`:
+  - `interes`: pago de interés mensual.
+  - `total`: liquidación (capital restante + interés acumulado).
+- Validación en BD:
+  - Límites configurables (`loan_settings.max_loans_per_cycle` y `loan_settings.max_active_loans`) validados por trigger al crear préstamos.
+  - Para liquidación total, la BD valida un mínimo requerido y calcula `capital_monto` / `interes_monto` en función de los meses transcurridos.
+
+### Actividades
+- El admin crea una actividad con:
+  - `invested_amount`: inversión/presupuesto (sale del ahorro global mientras la actividad está activa).
+  - cuota por socio: `required_quantity` y `unit_amount`.
+- Los socios pueden aportar múltiples veces.
+- Contabilidad (a nivel de UI/funciones):
+  - Mientras la actividad está activa, su inversión se descuenta del total ahorrado.
+  - Al cerrar, la inversión deja de descontarse y la ganancia (recaudo aprobado - inversión) se muestra en la sección de Intereses.

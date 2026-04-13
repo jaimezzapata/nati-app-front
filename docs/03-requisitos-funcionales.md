@@ -66,10 +66,27 @@
 - RF-35: Al aprobar/rechazar debe existir confirmación.
 - RF-36: Si se rechaza, el admin debe escribir el motivo; el socio debe ver ese motivo.
 
+### 5.4 Límites (admin)
+- RF-41: El admin puede configurar el máximo de préstamos aprobados por ciclo (año actual).
+- RF-42: El admin puede configurar el máximo de préstamos activos simultáneos.
+- RF-43: La base de datos debe impedir solicitudes que excedan estos límites.
+
+### 5.5 Pagos de préstamo (socio + admin)
+- RF-44: El socio puede reportar pagos de préstamo con soporte:
+  - interés mensual
+  - pago total (liquidación)
+- RF-45: Los pagos reportados quedan en estado pendiente hasta aprobación/rechazo del admin.
+- RF-46: El admin puede aprobar/rechazar pagos y registrar motivo.
+
+### 5.6 Interés acumulado por mora (regla)
+- RF-47: Si el socio se demora meses en pagar, el interés se acumula mensualmente.
+- RF-48: Para pagar “Total”, el mínimo requerido debe ser capital restante + interés acumulado pendiente.
+- RF-49: La validación del mínimo requerido debe hacerse en la base de datos.
+
 ## 6. Dashboard (admin)
 - RF-37: Dashboard debe usar datos reales desde la base de datos:
   - socios activos
-  - total ahorrado (abonos aprobados)
+  - total ahorrado (abonos aprobados menos inversión de actividades activas)
   - agregación mensual Dic→Nov
   - préstamos activos
 
@@ -79,3 +96,19 @@
 
 ## 8. Despliegue
 - RF-40: Configurar rewrite SPA para que las rutas no fallen al refrescar en Vercel.
+
+## 9. Actividades
+- RF-50: El admin puede crear actividades con:
+  - título y categoría
+  - cuota (cantidad requerida y valor por unidad)
+  - inversión/presupuesto
+- RF-51: Los socios deben poder reportar aportes con soporte y fecha real de pago.
+- RF-52: Un socio puede hacer múltiples aportes a la misma actividad.
+- RF-53: El admin puede aprobar/rechazar aportes y registrar motivo.
+- RF-54: Una actividad debe poder cerrarse (pasar a historial).
+
+## 10. Intereses (admin)
+- RF-55: La sección de Intereses debe sumar:
+  - intereses aprobados de pagos de préstamos
+  - ganancias de actividades cerradas (recaudo aprobado - inversión)
+- RF-56: Debe existir un historial unificado de eventos (préstamo/actividad).
