@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Check, RefreshCw, X } from 'lucide-react'
+import { Check, RefreshCw } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient.js'
 
 const BUCKET = import.meta.env.VITE_STORAGE_BUCKET || 'nati-app'
@@ -95,11 +95,15 @@ function Modal({ open, title, children, onClose }) {
 function AdminPrestamos({ title, description }) {
   const DEFAULT_INTEREST = 5
   const DEFAULT_MAX_PERCENT = 70
+  const DEFAULT_MAX_LOANS_PER_CYCLE = 5
+  const DEFAULT_MAX_ACTIVE_LOANS = 2
 
   const [settingsLoading, setSettingsLoading] = useState(true)
   const [settingsError, setSettingsError] = useState('')
   const [interestRate, setInterestRate] = useState(DEFAULT_INTEREST)
   const [maxPercent, setMaxPercent] = useState(DEFAULT_MAX_PERCENT)
+  const [maxLoansPerCycle, setMaxLoansPerCycle] = useState(DEFAULT_MAX_LOANS_PER_CYCLE)
+  const [maxActiveLoans, setMaxActiveLoans] = useState(DEFAULT_MAX_ACTIVE_LOANS)
   const [savingSettings, setSavingSettings] = useState(false)
 
   const [loansLoading, setLoansLoading] = useState(true)
@@ -114,6 +118,7 @@ function AdminPrestamos({ title, description }) {
   const [actingPaymentId, setActingPaymentId] = useState(null)
 
   const [query, setQuery] = useState('')
+  const [tab, setTab] = useState('all') // all | solicitudes | pagos | aprobados
 
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [confirmLoan, setConfirmLoan] = useState(null)
@@ -126,22 +131,37 @@ function AdminPrestamos({ title, description }) {
   const [confirmPayAction, setConfirmPayAction] = useState(null)
   const [confirmPayNote, setConfirmPayNote] = useState('')
   const [confirmPayError, setConfirmPayError] = useState('')
+  const [rulesOpen, setRulesOpen] = useState(false)
+  const [payViewOpen, setPayViewOpen] = useState(false)
+  const [payView, setPayView] = useState(null)
 
   const loadSettings = useCallback(async () => {
     setSettingsLoading(true)
     setSettingsError('')
 
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('loan_settings')
-      .select('id, interest_rate_percent, max_loan_percent, updated_at, updated_by')
+      .select('id, interest_rate_percent, max_loan_percent, max_loans_per_cycle, max_active_loans, updated_at, updated_by')
       .eq('id', 1)
       .maybeSingle()
+
+    if (error?.code === '42703') {
+      const retry = await supabase
+        .from('loan_settings')
+        .select('id, interest_rate_percent, max_loan_percent, updated_at, updated_by')
+        .eq('id', 1)
+        .maybeSingle()
+      data = retry.data
+      error = retry.error
+    }
 
     if (error) {
       const extra = [error.code, error.hint].filter(Boolean).join(' · ')
       setSettingsError(extra ? `${error.message} (${extra})` : error.message)
       setInterestRate(DEFAULT_INTEREST)
       setMaxPercent(DEFAULT_MAX_PERCENT)
+      setMaxLoansPerCycle(DEFAULT_MAX_LOANS_PER_CYCLE)
+      setMaxActiveLoans(DEFAULT_MAX_ACTIVE_LOANS)
       setSettingsLoading(false)
       return
     }
@@ -149,11 +169,17 @@ function AdminPrestamos({ title, description }) {
     if (data) {
       const ir = Number(data.interest_rate_percent ?? DEFAULT_INTEREST)
       const mp = Number(data.max_loan_percent ?? DEFAULT_MAX_PERCENT)
+      const ml = Number(data.max_loans_per_cycle ?? DEFAULT_MAX_LOANS_PER_CYCLE)
+      const ma = Number(data.max_active_loans ?? DEFAULT_MAX_ACTIVE_LOANS)
       setInterestRate(Number.isFinite(ir) ? ir : DEFAULT_INTEREST)
       setMaxPercent(Number.isFinite(mp) ? mp : DEFAULT_MAX_PERCENT)
+      setMaxLoansPerCycle(Number.isFinite(ml) ? ml : DEFAULT_MAX_LOANS_PER_CYCLE)
+      setMaxActiveLoans(Number.isFinite(ma) ? ma : DEFAULT_MAX_ACTIVE_LOANS)
     } else {
       setInterestRate(DEFAULT_INTEREST)
       setMaxPercent(DEFAULT_MAX_PERCENT)
+      setMaxLoansPerCycle(DEFAULT_MAX_LOANS_PER_CYCLE)
+      setMaxActiveLoans(DEFAULT_MAX_ACTIVE_LOANS)
     }
 
     setSettingsLoading(false)
@@ -269,6 +295,8 @@ function AdminPrestamos({ title, description }) {
     setSettingsError('')
     const ir = Number(interestRate)
     const mp = Number(maxPercent)
+    const ml = Number(maxLoansPerCycle)
+    const ma = Number(maxActiveLoans)
 
     if (!Number.isFinite(ir) || ir <= 0) {
       setSettingsError('El % de interés debe ser mayor a 0')
@@ -276,6 +304,18 @@ function AdminPrestamos({ title, description }) {
     }
     if (!Number.isFinite(mp) || mp <= 0) {
       setSettingsError('El tope máximo debe ser mayor a 0')
+      return
+    }
+    if (!Number.isFinite(ml) || ml <= 0 || !Number.isInteger(ml)) {
+      setSettingsError('El máximo de préstamos por ciclo debe ser un entero mayor a 0')
+      return
+    }
+    if (!Number.isFinite(ma) || ma <= 0 || !Number.isInteger(ma)) {
+      setSettingsError('El máximo de préstamos activos debe ser un entero mayor a 0')
+      return
+    }
+    if (ma > ml) {
+      setSettingsError('El máximo de préstamos activos no puede ser mayor al máximo por ciclo')
       return
     }
 
@@ -294,11 +334,24 @@ function AdminPrestamos({ title, description }) {
       id: 1,
       interest_rate_percent: ir,
       max_loan_percent: mp,
+      max_loans_per_cycle: ml,
+      max_active_loans: ma,
       updated_by: sessionData.session.user.id,
       updated_at: new Date().toISOString(),
     }
 
-    const { error } = await supabase.from('loan_settings').upsert(payload, { onConflict: 'id' })
+    let { error } = await supabase.from('loan_settings').upsert(payload, { onConflict: 'id' })
+    if (error?.code === '42703') {
+      const fallbackPayload = {
+        id: 1,
+        interest_rate_percent: ir,
+        max_loan_percent: mp,
+        updated_by: sessionData.session.user.id,
+        updated_at: new Date().toISOString(),
+      }
+      const retry = await supabase.from('loan_settings').upsert(fallbackPayload, { onConflict: 'id' })
+      error = retry.error
+    }
     setSavingSettings(false)
 
     if (error) {
@@ -324,6 +377,11 @@ function AdminPrestamos({ title, description }) {
     setConfirmPay(pay ?? null)
     setConfirmPayNote('')
     setConfirmPayOpen(true)
+  }
+
+  function openPayView(pay) {
+    setPayView(pay ?? null)
+    setPayViewOpen(true)
   }
 
   async function decideLoan(id, nextStatus, decisionNote) {
@@ -418,13 +476,6 @@ function AdminPrestamos({ title, description }) {
     setConfirmPayNote('')
   }
 
-  const totals = useMemo(() => {
-    const pending = loans.filter((l) => l.status === 'pending').length
-    const approved = loans.filter((l) => l.status === 'approved').length
-    const rejected = loans.filter((l) => l.status === 'rejected').length
-    return { pending, approved, rejected }
-  }, [loans])
-
   const filteredLoans = useMemo(() => {
     const q = String(query || '').trim().toLowerCase()
     if (!q) return loans
@@ -436,6 +487,18 @@ function AdminPrestamos({ title, description }) {
       return name.includes(q) || phone.includes(q) || note.includes(q)
     })
   }, [loans, profilesById, query])
+
+  const loanCounts = useMemo(() => {
+    let pending = 0
+    let approved = 0
+    let rejected = 0
+    for (const l of filteredLoans) {
+      if (l.status === 'pending') pending += 1
+      else if (l.status === 'approved') approved += 1
+      else if (l.status === 'rejected') rejected += 1
+    }
+    return { all: filteredLoans.length, pending, approved, rejected }
+  }, [filteredLoans])
 
   const loansByStatus = useMemo(() => {
     const pending = []
@@ -462,23 +525,17 @@ function AdminPrestamos({ title, description }) {
     })
   }, [payments, profilesById, query])
 
-  const paymentsByStatus = useMemo(() => {
-    const pending = []
-    const approved = []
-    const rejected = []
+  const paymentCounts = useMemo(() => {
+    let pending = 0
+    let approved = 0
+    let rejected = 0
     for (const p of filteredPayments) {
-      if (p.estado === 'pending') pending.push(p)
-      else if (p.estado === 'approved') approved.push(p)
-      else if (p.estado === 'rejected') rejected.push(p)
+      if (p.estado === 'pending') pending += 1
+      else if (p.estado === 'approved') approved += 1
+      else if (p.estado === 'rejected') rejected += 1
     }
-    return { pending, approved, rejected }
+    return { all: filteredPayments.length, pending, approved, rejected }
   }, [filteredPayments])
-
-  const loanById = useMemo(() => {
-    const m = new Map()
-    for (const l of loans) m.set(l.id, l)
-    return m
-  }, [loans])
 
   const paidCapitalByLoanId = useMemo(() => {
     const m = new Map()
@@ -503,6 +560,17 @@ function AdminPrestamos({ title, description }) {
     return s
   }, [loans, paidCapitalByLoanId])
 
+  const loansForTable = useMemo(() => {
+    if (tab === 'solicitudes') return loansByStatus.pending
+    if (tab === 'aprobados') return loansByStatus.approved
+    return filteredLoans
+  }, [filteredLoans, loansByStatus, tab])
+
+  const paymentsForTable = useMemo(() => {
+    if (tab !== 'pagos') return []
+    return filteredPayments
+  }, [filteredPayments, tab])
+
   return (
     <div>
       <div className="mb-5">
@@ -510,33 +578,356 @@ function AdminPrestamos({ title, description }) {
         <p className="mt-1 text-sm text-slate-500">{description}</p>
       </div>
 
-      <div className="grid gap-3 lg:grid-cols-[360px_1fr]">
-        <div className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-purple-200/50 lg:col-span-1">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-sm font-bold text-slate-900">Reglas del préstamo</div>
+      <div className="grid gap-3">
+        <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-bold text-slate-900">Panel de préstamos</div>
               <div className="mt-1 text-sm text-slate-500">
-                Por defecto: {DEFAULT_INTEREST}% interés y {DEFAULT_MAX_PERCENT}% del total ahorrado.
+                Interés: <span className="font-extrabold text-slate-900">{Number(interestRate) || DEFAULT_INTEREST}%</span> ·
+                Tope: <span className="font-extrabold text-slate-900">{Number(maxPercent) || DEFAULT_MAX_PERCENT}%</span> ·
+                Máx/ciclo: <span className="font-extrabold text-slate-900">{Number(maxLoansPerCycle) || DEFAULT_MAX_LOANS_PER_CYCLE}</span> ·
+                Máx activos: <span className="font-extrabold text-slate-900">{Number(maxActiveLoans) || DEFAULT_MAX_ACTIVE_LOANS}</span>
               </div>
             </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setSettingsError('')
+                  setRulesOpen(true)
+                }}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-4 text-sm font-extrabold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200"
+              >
+                Reglas del préstamo
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  loadSettings()
+                  loadLoans()
+                  loadPayments()
+                }}
+                className="grid h-10 w-10 place-items-center rounded-2xl border border-purple-200/60 bg-white text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                aria-label="Actualizar"
+                title="Actualizar"
+              >
+                <RefreshCw className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {[
+                { id: 'all', label: 'Todos' },
+                { id: 'solicitudes', label: 'Solicitudes' },
+                { id: 'pagos', label: 'Pagos reportados' },
+                { id: 'aprobados', label: 'Aprobados' },
+              ].map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setTab(t.id)}
+                  className={[
+                    'inline-flex h-10 items-center justify-center rounded-2xl px-3 text-sm font-extrabold shadow-sm transition focus:outline-none focus:ring-4 focus:ring-purple-200',
+                    tab === t.id
+                      ? 'bg-purple-700 text-white hover:bg-purple-500'
+                      : 'border border-purple-200/60 bg-white text-slate-900 hover:bg-purple-50',
+                  ].join(' ')}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            <input
+              className="h-10 w-full max-w-xs rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:ring-4 focus:ring-purple-200"
+              placeholder="Buscar (nombre/teléfono/mes)…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-bold text-slate-900">
+                {tab === 'pagos' ? 'Pagos reportados' : tab === 'solicitudes' ? 'Solicitudes' : tab === 'aprobados' ? 'Aprobados' : 'Todos'}
+              </div>
+              <div className="mt-1 text-sm text-slate-500">
+                {tab === 'pagos'
+                  ? `Pendientes: ${paymentCounts.pending} · Aprobados: ${paymentCounts.approved} · Rechazados: ${paymentCounts.rejected} · Total: ${paymentCounts.all}`
+                  : tab === 'solicitudes'
+                  ? `Pendientes: ${loansForTable.length} · Total: ${loanCounts.all}`
+                  : tab === 'aprobados'
+                  ? `Aprobados: ${loansForTable.length} · Liquidados: ${loansForTable.filter((l) => liquidatedLoanIds.has(l.id)).length}`
+                  : `Pendientes: ${loanCounts.pending} · Aprobadas: ${loanCounts.approved} · Rechazadas: ${loanCounts.rejected} · Total: ${loanCounts.all}`}
+              </div>
+            </div>
+
             <button
               type="button"
-              onClick={loadSettings}
+              onClick={() => {
+                if (tab === 'pagos') loadPayments()
+                else loadLoans()
+              }}
               className="grid h-10 w-10 place-items-center rounded-2xl border border-purple-200/60 bg-white text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
-              aria-label="Actualizar reglas"
+              aria-label="Actualizar"
               title="Actualizar"
             >
               <RefreshCw className="h-4 w-4" aria-hidden="true" />
             </button>
           </div>
 
-          {settingsError ? (
-            <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
-              {settingsError}
-            </div>
+          {tab === 'pagos' ? (
+            paymentsError ? (
+              <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">{paymentsError}</div>
+            ) : null
+          ) : loansError ? (
+            <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">{loansError}</div>
           ) : null}
 
-          <div className="mt-4 grid gap-3">
+          {tab === 'pagos' ? (
+            paymentsLoading ? (
+              <div className="mt-4 grid gap-2">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="h-14 animate-pulse rounded-2xl bg-purple-50 ring-1 ring-purple-200/60" />
+                ))}
+              </div>
+            ) : (
+              <div className="mt-4 overflow-x-auto rounded-3xl ring-1 ring-purple-200/60">
+                <table className="w-full min-w-[1060px] border-separate border-spacing-0">
+                  <thead className="bg-purple-50">
+                    <tr className="text-left text-xs font-extrabold text-slate-700">
+                      <th className="px-4 py-3">Fecha</th>
+                      <th className="px-4 py-3">Socio</th>
+                      <th className="px-4 py-3">Teléfono</th>
+                      <th className="px-4 py-3">Tipo</th>
+                      <th className="px-4 py-3">Mes</th>
+                      <th className="px-4 py-3">Total</th>
+                      <th className="px-4 py-3">Capital</th>
+                      <th className="px-4 py-3">Interés</th>
+                      <th className="px-4 py-3">Estado</th>
+                      <th className="px-4 py-3">Comprobante</th>
+                      <th className="px-4 py-3">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-purple-200/40 bg-white">
+                    {paymentsForTable.length ? (
+                      paymentsForTable.map((p) => {
+                        const profile = profilesById.get(p.socio_id)
+                        const name = profile?.full_name || 'Socio'
+                        const phone = profile?.phone || '—'
+                        const paidAt = p.fecha_pago
+                          ? new Date(p.fecha_pago).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                          : p.created_at
+                          ? new Date(p.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                          : '—'
+                        const receiptUrl = p.comprobante_url ? publicUrlFor(p.comprobante_url) : ''
+
+                        return (
+                          <tr key={p.id} className="text-sm text-slate-900">
+                            <td className="px-4 py-3 whitespace-nowrap">{paidAt}</td>
+                            <td className="px-4 py-3">{name}</td>
+                            <td className="px-4 py-3 whitespace-nowrap">{phone}</td>
+                            <td className="px-4 py-3">
+                              {p.tipo === 'interes'
+                                ? 'Interés'
+                                : p.tipo === 'total'
+                                ? 'Total'
+                                : p.tipo === 'capital'
+                                ? 'Capital'
+                                : 'Pago'}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap">{p.mes_correspondiente || '—'}</td>
+                            <td className="px-4 py-3 whitespace-nowrap font-extrabold">{formatCop(p.monto)}</td>
+                            <td className="px-4 py-3 whitespace-nowrap">{formatCop(p.capital_monto ?? 0)}</td>
+                            <td className="px-4 py-3 whitespace-nowrap">{formatCop(p.interes_monto ?? 0)}</td>
+                            <td className="px-4 py-3">
+                              <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusPill(p.estado)}`}>
+                                {p.estado === 'approved' ? 'Aprobado' : p.estado === 'pending' ? 'Pendiente' : 'Rechazado'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3">
+                              {receiptUrl ? (
+                                <a
+                                  className="inline-flex h-9 items-center justify-center rounded-2xl border border-purple-200/60 bg-white px-3 text-xs font-extrabold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                                  href={receiptUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  Ver
+                                </a>
+                              ) : (
+                                <span className="text-xs font-semibold text-slate-500">—</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              {p.estado === 'pending' ? (
+                                <div className="flex flex-wrap items-center justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={actingPaymentId === p.id}
+                                    onClick={() => openConfirmPay('rejected', p)}
+                                    className="inline-flex h-9 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-3 text-xs font-extrabold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60"
+                                  >
+                                    Rechazar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={actingPaymentId === p.id}
+                                    onClick={() => openConfirmPay('approved', p)}
+                                    className="inline-flex h-9 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-3 text-xs font-extrabold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
+                                  >
+                                    Aprobar
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => openPayView(p)}
+                                  className="inline-flex h-9 items-center justify-center rounded-2xl border border-purple-200/60 bg-white px-3 text-xs font-extrabold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                                >
+                                  Ver
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      })
+                    ) : (
+                      <tr>
+                        <td colSpan={11} className="px-4 py-6 text-sm font-semibold text-slate-600">
+                          Sin registros.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )
+          ) : loansLoading ? (
+            <div className="mt-4 grid gap-2">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="h-14 animate-pulse rounded-2xl bg-purple-50 ring-1 ring-purple-200/60" />
+              ))}
+            </div>
+          ) : (
+            <div className="mt-4 overflow-x-auto rounded-3xl ring-1 ring-purple-200/60">
+              <table className="w-full min-w-[1100px] border-separate border-spacing-0">
+                <thead className="bg-purple-50">
+                  <tr className="text-left text-xs font-extrabold text-slate-700">
+                    <th className="px-4 py-3">Fecha</th>
+                    <th className="px-4 py-3">Socio</th>
+                    <th className="px-4 py-3">Teléfono</th>
+                    <th className="px-4 py-3">Monto</th>
+                    <th className="px-4 py-3">Interés</th>
+                    <th className="px-4 py-3">Estado</th>
+                    <th className="px-4 py-3">Liquidado</th>
+                    <th className="px-4 py-3">Nota</th>
+                    <th className="px-4 py-3">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-purple-200/40 bg-white">
+                  {loansForTable.length ? (
+                    loansForTable.map((l) => {
+                      const p = profilesById.get(l.user_id)
+                      const name = p?.full_name || 'Socio'
+                      const phone = p?.phone || '—'
+                      const createdAt = l.created_at
+                        ? new Date(l.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                        : '—'
+                      const savedRate = Number(l.interest_rate_percent)
+                      const savedRateLabel = Number.isFinite(savedRate) && savedRate > 0 ? `${savedRate}%` : '—'
+                      const liquidado = liquidatedLoanIds.has(l.id)
+
+                      return (
+                        <tr key={l.id} className="text-sm text-slate-900">
+                          <td className="px-4 py-3 whitespace-nowrap">{createdAt}</td>
+                          <td className="px-4 py-3">{name}</td>
+                          <td className="px-4 py-3 whitespace-nowrap">{phone}</td>
+                          <td className="px-4 py-3 whitespace-nowrap font-extrabold">{formatCop(l.amount)}</td>
+                          <td className="px-4 py-3 whitespace-nowrap">{savedRateLabel}</td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusPill(l.status)}`}>
+                              {l.status === 'approved' ? 'Aprobado' : l.status === 'pending' ? 'Pendiente' : l.status === 'rejected' ? 'Rechazado' : '—'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            {liquidado ? (
+                              <span className="inline-flex rounded-full bg-purple-50 px-2 py-0.5 text-[11px] font-semibold text-purple-700 ring-1 ring-purple-200/70">
+                                Sí
+                              </span>
+                            ) : (
+                              <span className="text-xs font-semibold text-slate-500">—</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 max-w-[420px]">
+                            <div className="truncate text-sm text-slate-700">{l.note || l.decision_note || '—'}</div>
+                          </td>
+                          <td className="px-4 py-3">
+                            {l.status === 'pending' ? (
+                              <div className="flex flex-wrap items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  disabled={actingId === l.id}
+                                  onClick={() => openConfirm('rejected', l)}
+                                  className="inline-flex h-9 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-3 text-xs font-extrabold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60"
+                                >
+                                  Rechazar
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={actingId === l.id}
+                                  onClick={() => openConfirm('approved', l)}
+                                  className="inline-flex h-9 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-3 text-xs font-extrabold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
+                                >
+                                  Aprobar
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="text-xs font-semibold text-slate-500">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={9} className="px-4 py-6 text-sm font-semibold text-slate-600">
+                        Sin registros.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <Modal
+        open={rulesOpen}
+        title="Reglas del préstamo"
+        onClose={() => {
+          setRulesOpen(false)
+          setSettingsError('')
+        }}
+      >
+        <div className="grid gap-4">
+          <div className="text-sm text-slate-500">
+            Por defecto: {DEFAULT_INTEREST}% interés y {DEFAULT_MAX_PERCENT}% del total ahorrado.
+          </div>
+
+          {settingsError ? (
+            <div className="rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">{settingsError}</div>
+          ) : null}
+
+          <div className="grid gap-3">
             <label className="grid gap-2">
               <span className="text-xs font-semibold text-slate-500">% interés</span>
               <input
@@ -559,305 +950,130 @@ function AdminPrestamos({ title, description }) {
               />
             </label>
 
+            <label className="grid gap-2">
+              <span className="text-xs font-semibold text-slate-500">Máximo de préstamos por ciclo</span>
+              <input
+                className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200 disabled:opacity-60"
+                inputMode="numeric"
+                value={maxLoansPerCycle}
+                onChange={(e) => setMaxLoansPerCycle(e.target.value)}
+                disabled={settingsLoading || savingSettings}
+              />
+            </label>
+
+            <label className="grid gap-2">
+              <span className="text-xs font-semibold text-slate-500">Máximo de préstamos activos simultáneos</span>
+              <input
+                className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200 disabled:opacity-60"
+                inputMode="numeric"
+                value={maxActiveLoans}
+                onChange={(e) => setMaxActiveLoans(e.target.value)}
+                disabled={settingsLoading || savingSettings}
+              />
+            </label>
+
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  loadSettings()
+                }}
+                disabled={settingsLoading || savingSettings}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-4 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60"
+              >
+                <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                Recargar
+              </button>
+              <button
+                type="button"
+                onClick={saveSettings}
+                disabled={settingsLoading || savingSettings}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-4 text-sm font-extrabold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
+              >
+                <Check className="h-4 w-4" aria-hidden="true" />
+                {savingSettings ? 'Guardando…' : 'Guardar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={payViewOpen}
+        title="Detalle del pago"
+        onClose={() => {
+          setPayViewOpen(false)
+          setPayView(null)
+        }}
+      >
+        <div className="grid gap-3">
+          <div className="rounded-2xl bg-purple-50 px-3 py-2 ring-1 ring-purple-200/60">
+            <div className="text-xs font-semibold text-purple-700">Estado</div>
+            <div className="mt-1">
+              <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusPill(payView?.estado)}`}>
+                {payView?.estado === 'approved' ? 'Aprobado' : payView?.estado === 'pending' ? 'Pendiente' : payView?.estado === 'rejected' ? 'Rechazado' : '—'}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid gap-2 rounded-2xl bg-white px-3 py-2 ring-1 ring-purple-200/60">
+            <div className="text-xs font-semibold text-slate-500">Socio</div>
+            <div className="text-sm font-extrabold text-slate-900">
+              {(profilesById.get(payView?.socio_id)?.full_name || 'Socio') + ' · ' + (profilesById.get(payView?.socio_id)?.phone || '—')}
+            </div>
+            <div className="text-xs font-semibold text-slate-500">
+              {(payView?.fecha_pago
+                ? new Date(payView.fecha_pago).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                : payView?.created_at
+                ? new Date(payView.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                : '—') +
+                ' · ' +
+                (payView?.tipo === 'interes'
+                  ? `Interés${payView?.mes_correspondiente ? ` (${payView.mes_correspondiente})` : ''}`
+                  : payView?.tipo === 'total'
+                  ? 'Pago total'
+                  : payView?.tipo === 'capital'
+                  ? 'Capital'
+                  : 'Pago')}
+            </div>
+          </div>
+
+          <div className="grid gap-2 rounded-2xl bg-white px-3 py-2 ring-1 ring-purple-200/60">
+            <div className="text-xs font-semibold text-slate-500">Montos</div>
+            <div className="text-sm font-extrabold text-slate-900">Total: {formatCop(payView?.monto ?? 0)}</div>
+            <div className="text-xs font-semibold text-slate-500">
+              Capital: {formatCop(payView?.capital_monto ?? 0)} · Interés: {formatCop(payView?.interes_monto ?? 0)}
+            </div>
+          </div>
+
+          {payView?.comentarios ? (
+            <div className="rounded-2xl bg-white px-3 py-2 text-sm text-slate-900 ring-1 ring-purple-200/60">{payView.comentarios}</div>
+          ) : null}
+
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+            {payView?.comprobante_url ? (
+              <a
+                className="inline-flex h-11 items-center justify-center rounded-2xl border border-purple-200/60 bg-white px-4 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                href={publicUrlFor(payView.comprobante_url)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Ver comprobante
+              </a>
+            ) : null}
             <button
               type="button"
-              onClick={saveSettings}
-              disabled={settingsLoading || savingSettings}
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
+              className="inline-flex h-11 items-center justify-center rounded-2xl bg-purple-700 px-4 text-sm font-extrabold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200"
+              onClick={() => {
+                setPayViewOpen(false)
+                setPayView(null)
+              }}
             >
-              <Check className="h-4 w-4" aria-hidden="true" />
-              {savingSettings ? 'Guardando…' : 'Guardar'}
+              Cerrar
             </button>
           </div>
         </div>
-
-        <div className="grid gap-3 xl:grid-cols-2">
-          <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-bold text-slate-900">Solicitudes</div>
-                <div className="mt-1 text-sm text-slate-500">
-                  Pendientes: {totals.pending} · Aprobadas: {totals.approved} · Rechazadas: {totals.rejected}
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  className="h-10 w-60 rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:ring-4 focus:ring-purple-200"
-                  placeholder="Buscar (nombre/teléfono)…"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                />
-                <button
-                  type="button"
-                  onClick={loadLoans}
-                  className="grid h-10 w-10 place-items-center rounded-2xl border border-purple-200/60 bg-white text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
-                  aria-label="Actualizar solicitudes"
-                  title="Actualizar"
-                >
-                  <RefreshCw className="h-4 w-4" aria-hidden="true" />
-                </button>
-              </div>
-            </div>
-
-            {loansError ? (
-              <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
-                {loansError}
-              </div>
-            ) : null}
-
-            {loansLoading ? (
-              <div className="mt-4 grid gap-2">
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="h-14 animate-pulse rounded-2xl bg-purple-50 ring-1 ring-purple-200/60" />
-                ))}
-              </div>
-            ) : (
-              <div className="mt-4 grid gap-3">
-                {['pending', 'approved', 'rejected'].map((st) => {
-                  const list = loansByStatus[st]
-                  const label = st === 'pending' ? 'Pendientes' : st === 'approved' ? 'Aprobadas' : 'Rechazadas'
-                  return (
-                    <div key={st} className="rounded-3xl bg-purple-50 p-4 ring-1 ring-purple-200/60">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="text-sm font-extrabold text-slate-900">{label}</div>
-                        <div className="text-xs font-semibold text-slate-500">{list.length}</div>
-                      </div>
-
-                      {list.length ? (
-                        <div className="mt-3 grid max-h-[40vh] gap-2 overflow-auto pr-1">
-                          {list.map((l) => {
-                  const p = profilesById.get(l.user_id)
-                  const name = p?.full_name || 'Socio'
-                  const phone = p?.phone || '—'
-                  const createdAt = l.created_at
-                    ? new Date(l.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
-                    : '—'
-                  const savedRate = Number(l.interest_rate_percent)
-                  const savedRateLabel = Number.isFinite(savedRate) && savedRate > 0 ? `${savedRate}%` : '—'
-
-                  return (
-                    <div key={l.id} className="rounded-2xl border border-purple-200/50 bg-white px-3 py-3 shadow-sm">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-extrabold text-slate-900">
-                            {name} · {phone}
-                          </div>
-                          <div className="mt-0.5 text-xs font-semibold text-slate-500">
-                            {createdAt} · Interés: {savedRateLabel}
-                          </div>
-                          {l.note ? <div className="mt-2 text-sm text-slate-700">{l.note}</div> : null}
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <div className="text-sm font-extrabold text-slate-900">{formatCop(l.amount)}</div>
-                          {liquidatedLoanIds.has(l.id) ? (
-                            <span className="rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 bg-purple-50 text-purple-700 ring-purple-200/70">
-                              Liquidado
-                            </span>
-                          ) : null}
-                          <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusPill(l.status)}`}>
-                            {l.status === 'approved'
-                              ? 'Aprobado'
-                              : l.status === 'pending'
-                              ? 'Pendiente'
-                              : l.status === 'rejected'
-                              ? 'Rechazado'
-                              : '—'}
-                          </span>
-                        </div>
-                      </div>
-
-                      {l.status === 'pending' ? (
-                        <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            disabled={actingId === l.id}
-                            onClick={() => openConfirm('rejected', l)}
-                            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60"
-                          >
-                            <X className="h-4 w-4" aria-hidden="true" />
-                            Rechazar
-                          </button>
-                          <button
-                            type="button"
-                            disabled={actingId === l.id}
-                            onClick={() => openConfirm('approved', l)}
-                            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
-                          >
-                            <Check className="h-4 w-4" aria-hidden="true" />
-                            Aprobar
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                  )
-                          })}
-                        </div>
-                      ) : (
-                        <div className="mt-3 rounded-2xl bg-white px-3 py-3 text-sm text-slate-700 ring-1 ring-purple-200/60">
-                          Sin registros.
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-bold text-slate-900">Pagos reportados</div>
-                <div className="mt-1 text-sm text-slate-500">Confirma intereses o liquidaciones (pago total).</div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={loadPayments}
-                  className="grid h-10 w-10 place-items-center rounded-2xl border border-purple-200/60 bg-white text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
-                  aria-label="Actualizar pagos"
-                  title="Actualizar"
-                >
-                  <RefreshCw className="h-4 w-4" aria-hidden="true" />
-                </button>
-              </div>
-            </div>
-
-            {paymentsError ? (
-              <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
-                {paymentsError}
-              </div>
-            ) : null}
-
-            {paymentsLoading ? (
-              <div className="mt-4 grid gap-2">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="h-14 animate-pulse rounded-2xl bg-purple-50 ring-1 ring-purple-200/60" />
-                ))}
-              </div>
-            ) : (
-              <div className="mt-4 grid gap-3">
-                {['pending', 'approved', 'rejected'].map((st) => {
-                  const list = paymentsByStatus[st]
-                  const label = st === 'pending' ? 'Pendientes' : st === 'approved' ? 'Aprobados' : 'Rechazados'
-                  return (
-                    <div key={st} className="rounded-3xl bg-purple-50 p-4 ring-1 ring-purple-200/60">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="text-sm font-extrabold text-slate-900">{label}</div>
-                        <div className="text-xs font-semibold text-slate-500">{list.length}</div>
-                      </div>
-
-                      {list.length ? (
-                        <div className="mt-3 grid max-h-[40vh] gap-2 overflow-auto pr-1">
-                          {list.map((p) => {
-                  const profile = profilesById.get(p.socio_id)
-                  const name = profile?.full_name || 'Socio'
-                  const phone = profile?.phone || '—'
-                  const paidAt = p.fecha_pago
-                    ? new Date(p.fecha_pago).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
-                    : p.created_at
-                    ? new Date(p.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
-                    : '—'
-                  const loan = loanById.get(p.prestamo_id)
-                  const receiptUrl = p.comprobante_url ? publicUrlFor(p.comprobante_url) : ''
-
-                  return (
-                    <div key={p.id} className="rounded-2xl border border-purple-200/50 bg-white px-3 py-3 shadow-sm">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-extrabold text-slate-900">
-                            {name} · {phone}
-                          </div>
-                          <div className="mt-0.5 text-xs font-semibold text-slate-500">
-                            {paidAt}
-                            {loan?.amount ? ` · Préstamo: ${formatCop(loan.amount)}` : ''}
-                          </div>
-                          <div className="mt-2 text-sm text-slate-700">
-                            {p.tipo === 'interes'
-                              ? `Interés${p.mes_correspondiente ? ` (${p.mes_correspondiente})` : ''}`
-                              : p.tipo === 'total'
-                              ? 'Pago total (liquidación)'
-                              : p.tipo === 'capital'
-                              ? 'Capital'
-                              : 'Pago'}
-                          </div>
-                          <div className="mt-1 text-xs font-semibold text-slate-500">
-                            Capital: {formatCop(p.capital_monto ?? 0)} · Interés: {formatCop(p.interes_monto ?? 0)}
-                          </div>
-                          {p.comentarios ? (
-                            <div className="mt-1 text-xs font-semibold text-slate-500">{p.comentarios}</div>
-                          ) : null}
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <div className="text-sm font-extrabold text-slate-900">{formatCop(p.monto)}</div>
-                          <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusPill(p.estado)}`}>
-                            {p.estado === 'approved'
-                              ? 'Aprobado'
-                              : p.estado === 'pending'
-                              ? 'Pendiente'
-                              : p.estado === 'rejected'
-                              ? 'Rechazado'
-                              : '—'}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                        {receiptUrl ? (
-                          <a
-                            className="inline-flex h-10 items-center justify-center rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
-                            href={receiptUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Ver comprobante
-                          </a>
-                        ) : (
-                          <div className="text-xs font-semibold text-slate-500">Sin comprobante</div>
-                        )}
-
-                        {p.estado === 'pending' ? (
-                          <div className="flex flex-wrap items-center justify-end gap-2">
-                            <button
-                              type="button"
-                              disabled={actingPaymentId === p.id}
-                              onClick={() => openConfirmPay('rejected', p)}
-                              className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60"
-                            >
-                              <X className="h-4 w-4" aria-hidden="true" />
-                              Rechazar
-                            </button>
-                            <button
-                              type="button"
-                              disabled={actingPaymentId === p.id}
-                              onClick={() => openConfirmPay('approved', p)}
-                              className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
-                            >
-                              <Check className="h-4 w-4" aria-hidden="true" />
-                              Aprobar
-                            </button>
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-                  )
-                          })}
-                        </div>
-                      ) : (
-                        <div className="mt-3 rounded-2xl bg-white px-3 py-3 text-sm text-slate-700 ring-1 ring-purple-200/60">
-                          Sin registros.
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+      </Modal>
 
       <Modal
         open={confirmOpen}

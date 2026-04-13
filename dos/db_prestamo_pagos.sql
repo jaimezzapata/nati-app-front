@@ -26,6 +26,12 @@ SET
   capital_monto = CASE WHEN tipo IN ('capital', 'total') THEN monto ELSE 0 END,
   interes_monto = CASE WHEN tipo = 'interes' THEN monto ELSE 0 END;
 
+ALTER TABLE public.loan_settings
+  ADD COLUMN IF NOT EXISTS max_loans_per_cycle INT NOT NULL DEFAULT 5;
+
+ALTER TABLE public.loan_settings
+  ADD COLUMN IF NOT EXISTS max_active_loans INT NOT NULL DEFAULT 2;
+
 -- Habilitar RLS
 ALTER TABLE public.prestamo_pagos ENABLE ROW LEVEL SECURITY;
 
@@ -86,6 +92,65 @@ BEGIN
   RETURN v_abonos + v_intereses - v_pendiente;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public SET row_security = off;
+
+CREATE OR REPLACE FUNCTION public.enforce_prestamo_limits()
+RETURNS trigger AS $$
+DECLARE
+  v_max_loans int;
+  v_max_active int;
+  v_cycle_approved int;
+  v_active int;
+BEGIN
+  SELECT ls.max_loans_per_cycle, ls.max_active_loans
+  INTO v_max_loans, v_max_active
+  FROM public.loan_settings ls
+  WHERE ls.id = 1;
+
+  IF v_max_loans IS NULL THEN
+    v_max_loans := 5;
+  END IF;
+
+  IF v_max_active IS NULL THEN
+    v_max_active := 2;
+  END IF;
+
+  SELECT COUNT(*)
+  INTO v_cycle_approved
+  FROM public.prestamos pr
+  WHERE pr.user_id = NEW.user_id
+    AND pr.status = 'approved'
+    AND pr.created_at >= date_trunc('year', now());
+
+  IF v_cycle_approved >= v_max_loans THEN
+    RAISE EXCEPTION 'Ya alcanzaste el máximo de préstamos aprobados del ciclo (%).', v_max_loans;
+  END IF;
+
+  SELECT COUNT(*)
+  INTO v_active
+  FROM public.prestamos pr
+  LEFT JOIN (
+    SELECT prestamo_id, COALESCE(SUM(capital_monto), 0) AS capital_pagado
+    FROM public.prestamo_pagos
+    WHERE estado = 'approved'
+    GROUP BY prestamo_id
+  ) paid ON paid.prestamo_id = pr.id
+  WHERE pr.user_id = NEW.user_id
+    AND pr.status = 'approved'
+    AND GREATEST(pr.amount - COALESCE(paid.capital_pagado, 0), 0) > 0;
+
+  IF v_active >= v_max_active THEN
+    RAISE EXCEPTION 'Ya tienes el máximo de préstamos activos simultáneos (%).', v_max_active;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public SET row_security = off;
+
+DROP TRIGGER IF EXISTS trg_enforce_prestamo_limits ON public.prestamos;
+CREATE TRIGGER trg_enforce_prestamo_limits
+BEFORE INSERT ON public.prestamos
+FOR EACH ROW
+EXECUTE FUNCTION public.enforce_prestamo_limits();
 
 -- 3. Función para obtener el ahorro total de un socio específico
 CREATE OR REPLACE FUNCTION get_socio_total_ahorro(p_socio_id UUID)

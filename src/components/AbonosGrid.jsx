@@ -150,6 +150,8 @@ export default function AbonosGrid({ mode, userId }) {
   const [bulkFiles, setBulkFiles] = useState([])
   const [bulkStatus, setBulkStatus] = useState('approved')
   const [bulkSaving, setBulkSaving] = useState(false)
+  const [approveAllOpen, setApproveAllOpen] = useState(false)
+  const [approveAllSaving, setApproveAllSaving] = useState(false)
 
   const cellRecordsMap = useMemo(() => {
     const m = new Map()
@@ -185,6 +187,10 @@ export default function AbonosGrid({ mode, userId }) {
     return rows
       .filter((r) => r.status === 'approved')
       .reduce((acc, r) => acc + Number(r.amount || 0), 0)
+  }, [rows])
+
+  const pendingIds = useMemo(() => {
+    return rows.filter((r) => r.status === 'pending' && r.id).map((r) => r.id)
   }, [rows])
 
   const monthIndexByPeriodDate = useMemo(() => {
@@ -425,6 +431,29 @@ export default function AbonosGrid({ mode, userId }) {
     setBulkFiles([])
     setBulkStatus('approved')
     setBulkOpen(true)
+  }
+
+  async function approveAllPending() {
+    setError('')
+    if (!pendingIds.length) {
+      setApproveAllOpen(false)
+      return
+    }
+
+    setApproveAllSaving(true)
+    const { error: updateError } = await supabase
+      .from('abonos')
+      .update({ status: 'approved' })
+      .in('id', pendingIds)
+    setApproveAllSaving(false)
+
+    if (updateError) {
+      setError(updateError.message)
+      return
+    }
+
+    setApproveAllOpen(false)
+    await load()
   }
 
   async function handleBulkSave() {
@@ -682,6 +711,17 @@ export default function AbonosGrid({ mode, userId }) {
                 <Layers className="h-4 w-4" aria-hidden="true" />
                 Masivo
               </button>
+              {mode === 'admin' ? (
+                <button
+                  type="button"
+                  onClick={() => setApproveAllOpen(true)}
+                  disabled={!pendingIds.length}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
+                >
+                  <Check className="h-4 w-4" aria-hidden="true" />
+                  Aprobar pendientes
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={load}
@@ -828,7 +868,7 @@ export default function AbonosGrid({ mode, userId }) {
           <label className="grid gap-2">
             <span className="text-xs font-semibold text-slate-500">Soporte (pantallazo)</span>
             <input
-              className="block w-full text-sm text-slate-900 file:mr-3 file:rounded-xl file:border-0 file:bg-white file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-900 file:shadow-sm file:ring-1 file:ring-purple-200/60"
+              className="block w-full text-sm text-slate-500 file:mr-4 file:rounded-full file:border-0 file:bg-purple-100 file:px-5 file:py-2 file:text-sm file:font-extrabold file:text-purple-700 file:shadow-sm file:ring-1 file:ring-purple-200/60 hover:file:bg-purple-200"
               type="file"
               accept="image/*"
               multiple
@@ -1018,7 +1058,7 @@ export default function AbonosGrid({ mode, userId }) {
               <label className="grid gap-2">
                 <span className="text-xs font-semibold text-slate-500">Soporte (pantallazo)</span>
                 <input
-                  className="block w-full text-sm text-slate-900 file:mr-3 file:rounded-xl file:border-0 file:bg-white file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-900 file:shadow-sm file:ring-1 file:ring-purple-200/60"
+                  className="block w-full text-sm text-slate-500 file:mr-4 file:rounded-full file:border-0 file:bg-purple-100 file:px-5 file:py-2 file:text-sm file:font-extrabold file:text-purple-700 file:shadow-sm file:ring-1 file:ring-purple-200/60 hover:file:bg-purple-200"
                   type="file"
                   accept="image/*"
                   multiple
@@ -1080,6 +1120,48 @@ export default function AbonosGrid({ mode, userId }) {
             >
               <Check className="h-4 w-4" aria-hidden="true" />
               {bulkSaving ? 'Guardando…' : mode === 'admin' && bulkAction === 'approve' ? 'Aprobar masivo' : 'Guardar masivo'}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={approveAllOpen}
+        title="Aprobar abonos pendientes"
+        onClose={() => {
+          if (approveAllSaving) return
+          setApproveAllOpen(false)
+        }}
+      >
+        <div className="grid gap-4">
+          <div className="rounded-2xl bg-purple-50 px-3 py-3 text-sm text-slate-900 ring-1 ring-purple-200/60">
+            Se aprobarán <span className="font-extrabold">{pendingIds.length}</span> abonos pendientes de este socio dentro del periodo actual.
+          </div>
+
+          {error ? (
+            <div role="alert" className="rounded-xl border border-pink-200 bg-white px-3 py-2 text-sm text-slate-900">
+              {error}
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
+            <button
+              type="button"
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-4 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+              onClick={() => setApproveAllOpen(false)}
+              disabled={approveAllSaving}
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+              Cancelar
+            </button>
+            <button
+              type="button"
+              disabled={approveAllSaving || !pendingIds.length}
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
+              onClick={approveAllPending}
+            >
+              <Check className="h-4 w-4" aria-hidden="true" />
+              {approveAllSaving ? 'Aprobando…' : 'Aprobar'}
             </button>
           </div>
         </div>

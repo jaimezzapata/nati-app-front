@@ -384,7 +384,7 @@ export default function SocioActividades() {
                     <label className="grid gap-2">
                       <span className="text-xs font-semibold text-slate-500">Soporte (pantallazo)</span>
                       <input
-                        className="block w-full text-sm text-slate-900 file:mr-3 file:rounded-xl file:border-0 file:bg-white file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-900 file:shadow-sm file:ring-1 file:ring-purple-200/60"
+                        className="block w-full text-sm text-slate-500 file:mr-4 file:rounded-full file:border-0 file:bg-purple-100 file:px-5 file:py-2 file:text-sm file:font-extrabold file:text-purple-700 file:shadow-sm file:ring-1 file:ring-purple-200/60 hover:file:bg-purple-200"
                         type="file"
                         accept="image/*"
                         multiple
