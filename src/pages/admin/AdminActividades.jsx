@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Check, Plus, RefreshCw, Trash2, X } from 'lucide-react'
+import { AlertTriangle, Check, Plus, RefreshCw, Trash2, X } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient.js'
 
 function formatCop(value) {
@@ -19,6 +19,28 @@ function statusPill(status) {
   if (status === 'pending') return 'bg-pink-50 text-pink-600 ring-pink-200/70'
   if (status === 'rejected') return 'bg-pink-50 text-pink-600 ring-pink-200/70'
   return 'bg-purple-50 text-purple-700 ring-purple-200/70'
+}
+
+function ErrorBanner({ message, className = '' }) {
+  if (!message) return null
+  return (
+    <div
+      role="alert"
+      className={[
+        'rounded-3xl border border-pink-300 bg-pink-50 px-4 py-3 text-sm font-semibold text-pink-900 shadow-sm',
+        'ring-1 ring-pink-200/70',
+        className,
+      ].join(' ')}
+    >
+      <div className="flex items-start gap-2">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-pink-700" aria-hidden="true" />
+        <div className="min-w-0">
+          <div className="text-xs font-extrabold uppercase tracking-wide text-pink-700">Error</div>
+          <div className="mt-0.5 break-words">{message}</div>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function Modal({ open, title, children, onClose }) {
@@ -84,12 +106,14 @@ export default function AdminActividades() {
   const [unitLabel, setUnitLabel] = useState('unidad')
   const [unitAmount, setUnitAmount] = useState('')
   const [requiredQuantity, setRequiredQuantity] = useState('1')
+  const [investedAmount, setInvestedAmount] = useState('')
   const [isActive, setIsActive] = useState(true)
 
   const [contribLoading, setContribLoading] = useState(false)
   const [contribError, setContribError] = useState('')
   const [contributions, setContributions] = useState([])
   const [profilesById, setProfilesById] = useState(() => new Map())
+  const [memberIds, setMemberIds] = useState([])
 
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [confirmAction, setConfirmAction] = useState(null)
@@ -98,14 +122,27 @@ export default function AdminActividades() {
   const [confirmError, setConfirmError] = useState('')
   const [actingId, setActingId] = useState(null)
 
+  const [closeOpen, setCloseOpen] = useState(false)
+  const [closeError, setCloseError] = useState('')
+  const [closing, setClosing] = useState(false)
+
   const loadActivities = useCallback(async () => {
     setLoading(true)
     setError('')
 
-    const { data, error: e } = await supabase
+    let { data, error: e } = await supabase
       .from('activities')
-      .select('id, title, category, unit_label, unit_amount, required_quantity, is_active, created_at, created_by')
+      .select('id, title, category, unit_label, unit_amount, required_quantity, invested_amount, is_active, created_at, created_by')
       .order('created_at', { ascending: false })
+
+    if (e?.code === '42703' || e?.code === 'PGRST204') {
+      const retry = await supabase
+        .from('activities')
+        .select('id, title, category, unit_label, unit_amount, required_quantity, is_active, created_at, created_by')
+        .order('created_at', { ascending: false })
+      data = retry.data
+      e = retry.error
+    }
 
     if (e) {
       const extra = [e.code, e.hint].filter(Boolean).join(' · ')
@@ -126,6 +163,7 @@ export default function AdminActividades() {
     if (!selectedId) {
       setContributions([])
       setProfilesById(new Map())
+      setMemberIds([])
       return
     }
 
@@ -168,22 +206,26 @@ export default function AdminActividades() {
     setContributions(list)
 
     const ids = Array.from(new Set(list.map((c) => c.user_id).filter(Boolean)))
-    if (!ids.length) {
+    if (ids.length) {
+      const { data: profiles, error: pErr } = await supabase.from('profiles').select('user_id, full_name, phone').in('user_id', ids)
+      if (!pErr) {
+        const m = new Map()
+        for (const p of profiles ?? []) m.set(p.user_id, p)
+        setProfilesById(m)
+      } else {
+        setProfilesById(new Map())
+      }
+    } else {
       setProfilesById(new Map())
-      setContribLoading(false)
-      return
     }
 
-    const { data: profiles, error: pErr } = await supabase.from('profiles').select('user_id, full_name, phone').in('user_id', ids)
-    if (pErr) {
-      setProfilesById(new Map())
-      setContribLoading(false)
-      return
-    }
-
-    const m = new Map()
-    for (const p of profiles ?? []) m.set(p.user_id, p)
-    setProfilesById(m)
+    const { data: members, error: mErr } = await supabase
+      .from('profiles')
+      .select('user_id')
+      .eq('is_active', true)
+      .eq('role', 'socio')
+    if (!mErr) setMemberIds((members ?? []).map((m) => m.user_id).filter(Boolean))
+    else setMemberIds([])
     setContribLoading(false)
   }, [selectedId])
 
@@ -208,6 +250,7 @@ export default function AdminActividades() {
     setUnitLabel('unidad')
     setUnitAmount('')
     setRequiredQuantity('1')
+    setInvestedAmount('')
     setIsActive(true)
     setOpenForm(true)
   }
@@ -221,6 +264,7 @@ export default function AdminActividades() {
     setUnitLabel(a.unit_label ?? 'unidad')
     setUnitAmount(a.unit_amount != null ? String(a.unit_amount) : '')
     setRequiredQuantity(a.required_quantity != null ? String(a.required_quantity) : '1')
+    setInvestedAmount(a.invested_amount != null ? String(a.invested_amount) : '')
     setIsActive(a.is_active !== false)
     setOpenForm(true)
   }
@@ -242,6 +286,13 @@ export default function AdminActividades() {
     const uaRaw = String(unitAmount ?? '').replace(/[^\d]/g, '')
     const ua = uaRaw ? Number(uaRaw) : 0
 
+    const invRaw = String(investedAmount ?? '').replace(/[^\d]/g, '')
+    const inv = invRaw ? Number(invRaw) : 0
+    if (!Number.isFinite(inv) || inv < 0) {
+      setError('La inversión debe ser 0 o mayor')
+      return
+    }
+
     const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
     if (sessionError) {
       setError(sessionError.message)
@@ -259,6 +310,7 @@ export default function AdminActividades() {
       unit_label: String(unitLabel ?? '').trim() || 'unidad',
       unit_amount: ua,
       required_quantity: rq,
+      invested_amount: inv,
       is_active: Boolean(isActive),
       created_by: sessionData.session.user.id,
     }
@@ -268,6 +320,22 @@ export default function AdminActividades() {
       r = await supabase.from('activities').update(payload).eq('id', selected.id).select('id').maybeSingle()
     } else {
       r = await supabase.from('activities').insert(payload).select('id').maybeSingle()
+    }
+    if (r.error?.code === '42703' || r.error?.code === 'PGRST204') {
+      const fallbackPayload = {
+        title: t,
+        category,
+        unit_label: String(unitLabel ?? '').trim() || 'unidad',
+        unit_amount: ua,
+        required_quantity: rq,
+        is_active: Boolean(isActive),
+        created_by: sessionData.session.user.id,
+      }
+      if (formMode === 'edit' && selected?.id) {
+        r = await supabase.from('activities').update(fallbackPayload).eq('id', selected.id).select('id').maybeSingle()
+      } else {
+        r = await supabase.from('activities').insert(fallbackPayload).select('id').maybeSingle()
+      }
     }
     setSaving(false)
 
@@ -345,6 +413,82 @@ export default function AdminActividades() {
     await loadActivities()
   }
 
+  const activityStats = useMemo(() => {
+    const memberCount = memberIds.length
+    let approvedSum = 0
+    const approvedUsers = new Set()
+    const pendingUsers = new Set()
+    const anyUsers = new Set()
+
+    for (const c of contributions) {
+      if (c.user_id) anyUsers.add(c.user_id)
+      const amt = Number(c.amount || 0)
+      if (c.status === 'approved') {
+        if (c.user_id) approvedUsers.add(c.user_id)
+        approvedSum += Number.isFinite(amt) ? amt : 0
+      } else if (c.status === 'pending') {
+        if (c.user_id) pendingUsers.add(c.user_id)
+      }
+    }
+
+    const participated = new Set([...approvedUsers, ...pendingUsers])
+    const missing = Math.max(memberCount - participated.size, 0)
+    const invested = Number(selected?.invested_amount || 0)
+    const profit = Math.max(approvedSum - (Number.isFinite(invested) ? invested : 0), 0)
+
+    return {
+      memberCount,
+      approvedSum,
+      invested: Number.isFinite(invested) ? invested : 0,
+      profit,
+      approvedUsers: approvedUsers.size,
+      pendingUsers: pendingUsers.size,
+      anyUsers: anyUsers.size,
+      missingUsers: missing,
+      completed: memberCount > 0 && approvedUsers.size >= memberCount,
+    }
+  }, [contributions, memberIds.length, selected?.invested_amount])
+
+  async function closeSelectedActivity() {
+    if (!selected?.id) return
+    setCloseError('')
+
+    const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
+    if (sessionError) {
+      setCloseError(sessionError.message)
+      return
+    }
+    if (!sessionData.session) {
+      setCloseError('No hay sesión activa')
+      return
+    }
+
+    setClosing(true)
+    const nowIso = new Date().toISOString()
+    const payload = {
+      is_active: false,
+      closed_at: nowIso,
+      closed_by: sessionData.session.user.id,
+    }
+
+    let { error: updErr } = await supabase.from('activities').update(payload).eq('id', selected.id)
+    if (updErr?.code === '42703' || updErr?.code === 'PGRST204') {
+      const retry = await supabase.from('activities').update({ is_active: false }).eq('id', selected.id)
+      updErr = retry.error
+    }
+
+    setClosing(false)
+    if (updErr) {
+      const extra = [updErr.code, updErr.hint].filter(Boolean).join(' · ')
+      setCloseError(extra ? `${updErr.message} (${extra})` : updErr.message)
+      return
+    }
+
+    setCloseOpen(false)
+    await loadActivities()
+    await loadContributions()
+  }
+
   return (
     <div>
       <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
@@ -375,16 +519,16 @@ export default function AdminActividades() {
         </div>
       </div>
 
-      {error ? (
-        <div role="alert" className="mb-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
-          {error}
-        </div>
-      ) : null}
+      <ErrorBanner message={error} className="mb-3" />
 
-      <div className="grid gap-3 lg:grid-cols-5">
-        <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50 lg:col-span-2">
-          <div className="text-sm font-bold text-slate-900">Actividades</div>
-          <div className="mt-1 text-sm text-slate-500">Selecciona una actividad para ver aportes.</div>
+      <div className="grid gap-4">
+        <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-bold text-slate-900">Actividades</div>
+              <div className="mt-1 text-sm text-slate-500">En curso y pasadas.</div>
+            </div>
+          </div>
 
           {loading ? (
             <div className="mt-4 grid gap-2">
@@ -393,31 +537,141 @@ export default function AdminActividades() {
               ))}
             </div>
           ) : activities.length ? (
-            <div className="mt-4 grid gap-2">
-              {activities.map((a) => (
-                <button
-                  key={a.id}
-                  type="button"
-                  onClick={() => setSelectedId(a.id)}
-                  className={[
-                    'w-full rounded-2xl border px-3 py-3 text-left shadow-sm transition focus:outline-none focus:ring-4 focus:ring-purple-200',
-                    selectedId === a.id ? 'border-purple-200/70 bg-purple-50' : 'border-purple-200/50 bg-white hover:bg-purple-50',
-                  ].join(' ')}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-extrabold text-slate-900">{a.title}</div>
-                      <div className="mt-0.5 text-xs font-semibold text-slate-500">
-                        {a.category} · {a.required_quantity} {a.unit_label}
-                        {Number(a.unit_amount || 0) > 0 ? ` · ${formatCop(a.unit_amount)} c/u` : ''}
-                      </div>
-                    </div>
-                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${a.is_active === false ? 'bg-pink-50 text-pink-600 ring-pink-200/70' : 'bg-purple-50 text-purple-700 ring-purple-200/70'}`}>
-                      {a.is_active === false ? 'Inactiva' : 'Activa'}
-                    </span>
-                  </div>
-                </button>
-              ))}
+            <div className="mt-4 grid gap-4">
+              <div className="overflow-x-auto rounded-3xl ring-1 ring-purple-200/60">
+                <table className="w-full min-w-[1180px] border-separate border-spacing-0">
+                  <thead className="bg-purple-50">
+                    <tr className="text-left text-xs font-extrabold text-slate-700">
+                      <th className="px-4 py-3">Actividad</th>
+                      <th className="px-4 py-3">Cuota</th>
+                      <th className="px-4 py-3">Inversión</th>
+                      <th className="px-4 py-3">Estado</th>
+                      <th className="px-4 py-3 text-right">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-purple-200/40 bg-white text-sm text-slate-900">
+                    {activities
+                      .filter((a) => a.is_active !== false)
+                      .map((a) => (
+                        <tr
+                          key={a.id}
+                          onClick={() => setSelectedId(a.id)}
+                          className={['cursor-pointer', selectedId === a.id ? 'bg-purple-50' : 'hover:bg-purple-50'].join(' ')}
+                        >
+                          <td className="px-4 py-3">
+                            <div className="truncate font-extrabold">{a.title}</div>
+                            <div className="mt-0.5 text-xs font-semibold text-slate-500">{a.category}</div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="text-sm font-semibold text-slate-900">
+                              {a.required_quantity} {a.unit_label}
+                              {Number(a.unit_amount || 0) > 0 ? ` · ${formatCop(a.unit_amount)} c/u` : ''}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap font-extrabold">{formatCop(a.invested_amount ?? 0)}</td>
+                          <td className="px-4 py-3">
+                            <span className="inline-flex rounded-full bg-purple-50 px-2 py-0.5 text-[11px] font-semibold text-purple-700 ring-1 ring-purple-200/70">
+                              Activa
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <div className="flex flex-wrap items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setSelectedId(a.id)
+                                  setCloseError('')
+                                  setCloseOpen(true)
+                                }}
+                                className="inline-flex h-9 items-center justify-center rounded-2xl bg-purple-700 px-3 text-xs font-extrabold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                              >
+                                Cerrar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  openEdit(a)
+                                }}
+                                className="inline-flex h-9 items-center justify-center rounded-2xl border border-purple-200/60 bg-white px-3 text-xs font-extrabold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                              >
+                                Editar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  deleteActivity(a.id)
+                                }}
+                                className="inline-flex h-9 items-center justify-center rounded-2xl border border-pink-200/70 bg-white px-3 text-xs font-extrabold text-pink-600 shadow-sm transition hover:bg-pink-50 focus:outline-none focus:ring-4 focus:ring-pink-200"
+                              >
+                                Eliminar
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    {activities.some((a) => a.is_active === false) ? (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-3 text-xs font-extrabold text-slate-700">
+                          Pasadas
+                        </td>
+                      </tr>
+                    ) : null}
+                    {activities
+                      .filter((a) => a.is_active === false)
+                      .map((a) => (
+                        <tr
+                          key={a.id}
+                          onClick={() => setSelectedId(a.id)}
+                          className={['cursor-pointer', selectedId === a.id ? 'bg-purple-50' : 'hover:bg-purple-50'].join(' ')}
+                        >
+                          <td className="px-4 py-3">
+                            <div className="truncate font-extrabold">{a.title}</div>
+                            <div className="mt-0.5 text-xs font-semibold text-slate-500">{a.category}</div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="text-sm font-semibold text-slate-900">
+                              {a.required_quantity} {a.unit_label}
+                              {Number(a.unit_amount || 0) > 0 ? ` · ${formatCop(a.unit_amount)} c/u` : ''}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap font-extrabold">{formatCop(a.invested_amount ?? 0)}</td>
+                          <td className="px-4 py-3">
+                            <span className="inline-flex rounded-full bg-pink-50 px-2 py-0.5 text-[11px] font-semibold text-pink-600 ring-1 ring-pink-200/70">
+                              Cerrada
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <div className="flex flex-wrap items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  openEdit(a)
+                                }}
+                                className="inline-flex h-9 items-center justify-center rounded-2xl border border-purple-200/60 bg-white px-3 text-xs font-extrabold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                              >
+                                Editar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  deleteActivity(a.id)
+                                }}
+                                className="inline-flex h-9 items-center justify-center rounded-2xl border border-pink-200/70 bg-white px-3 text-xs font-extrabold text-pink-600 shadow-sm transition hover:bg-pink-50 focus:outline-none focus:ring-4 focus:ring-pink-200"
+                              >
+                                Eliminar
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ) : (
             <div className="mt-4 rounded-3xl bg-purple-50 p-5 ring-1 ring-purple-200/60">
@@ -427,7 +681,7 @@ export default function AdminActividades() {
           )}
         </div>
 
-        <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50 lg:col-span-3">
+        <div className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-purple-200/50">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="text-sm font-bold text-slate-900">Aportes</div>
@@ -435,31 +689,36 @@ export default function AdminActividades() {
                 {selected ? `${selected.title} · ${selected.category}` : 'Selecciona una actividad'}
               </div>
             </div>
-            {selected ? (
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => openEdit(selected)}
-                  className="inline-flex h-10 items-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
-                >
-                  Editar
-                </button>
-                <button
-                  type="button"
-                  onClick={() => deleteActivity(selected.id)}
-                  className="grid h-10 w-10 place-items-center rounded-2xl border border-pink-200/70 bg-white text-pink-600 shadow-sm transition hover:bg-pink-50 focus:outline-none focus:ring-4 focus:ring-pink-200"
-                  aria-label="Eliminar actividad"
-                  title="Eliminar"
-                >
-                  <Trash2 className="h-4 w-4" aria-hidden="true" />
-                </button>
-              </div>
-            ) : null}
           </div>
 
-          {contribError ? (
-            <div role="alert" className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
-              {contribError}
+          <ErrorBanner message={contribError} className="mt-3" />
+
+          {selected && !contribLoading ? (
+            <div className="mt-3 overflow-x-auto rounded-3xl ring-1 ring-purple-200/60">
+              <table className="w-full min-w-[980px] border-separate border-spacing-0">
+                <thead className="bg-purple-50">
+                  <tr className="text-left text-xs font-extrabold text-slate-700">
+                    <th className="px-4 py-3">Inversión</th>
+                    <th className="px-4 py-3">Recaudo aprobado</th>
+                    <th className="px-4 py-3">Ganancia</th>
+                    <th className="px-4 py-3">Aprobados</th>
+                    <th className="px-4 py-3">Pendientes</th>
+                    <th className="px-4 py-3">Sin aporte</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white text-sm text-slate-900">
+                  <tr>
+                    <td className="px-4 py-3 whitespace-nowrap font-extrabold">{formatCop(activityStats.invested)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap font-extrabold">{formatCop(activityStats.approvedSum)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap font-extrabold text-purple-700">{formatCop(activityStats.profit)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap font-extrabold">
+                      {activityStats.approvedUsers}/{activityStats.memberCount}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap font-extrabold">{activityStats.pendingUsers}</td>
+                    <td className="px-4 py-3 whitespace-nowrap font-extrabold">{activityStats.missingUsers}</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           ) : null}
 
@@ -471,81 +730,92 @@ export default function AdminActividades() {
                 ))}
               </div>
             ) : contributions.length ? (
-              <div className="mt-4 grid gap-2">
-                {contributions.map((c) => {
-                  const p = profilesById.get(c.user_id)
-                  const name = p?.full_name || 'Socio'
-                  const phone = p?.phone || '—'
-                  const whenValue = c?.paid_at || c?.created_at
-                  const when = whenValue
-                    ? new Date(whenValue).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
-                    : '—'
-                  const supports = Array.isArray(c.support_paths) ? c.support_paths : []
-                  const urls = supports.map((s) => publicUrlFor(s)).filter(Boolean)
+              <div className="mt-4 overflow-x-auto rounded-3xl ring-1 ring-purple-200/60">
+                <table className="w-full min-w-[1180px] border-separate border-spacing-0">
+                  <thead className="bg-purple-50">
+                    <tr className="text-left text-xs font-extrabold text-slate-700">
+                      <th className="px-4 py-3">Fecha</th>
+                      <th className="px-4 py-3">Socio</th>
+                      <th className="px-4 py-3">Teléfono</th>
+                      <th className="px-4 py-3">Cantidad</th>
+                      <th className="px-4 py-3">Total</th>
+                      <th className="px-4 py-3">Estado</th>
+                      <th className="px-4 py-3">Soporte</th>
+                      <th className="px-4 py-3">Comentario / Motivo</th>
+                      <th className="px-4 py-3 text-right">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-purple-200/40 bg-white text-sm text-slate-900">
+                    {contributions.map((c) => {
+                      const p = profilesById.get(c.user_id)
+                      const name = p?.full_name || 'Socio'
+                      const phone = p?.phone || '—'
+                      const whenValue = c?.paid_at || c?.created_at
+                      const when = whenValue
+                        ? new Date(whenValue).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                        : '—'
+                      const supports = Array.isArray(c.support_paths) ? c.support_paths : []
+                      const url = supports.length ? publicUrlFor(supports[0]) : ''
+                      const note = c.status === 'rejected' ? (c.decision_note || '') : (c.comment || '')
 
-                  return (
-                    <div key={c.id} className="rounded-2xl border border-purple-200/50 bg-white px-3 py-3 shadow-sm">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-extrabold text-slate-900">{name} · {phone}</div>
-                          <div className="mt-0.5 text-xs font-semibold text-slate-500">
-                            {when} · Cant: {c.quantity} · Total: {formatCop(c.amount)}
-                          </div>
-                          {c.comment ? <div className="mt-2 text-sm text-slate-700">{c.comment}</div> : null}
-                          {c.status === 'rejected' && c.decision_note ? (
-                            <div className="mt-2 rounded-2xl bg-pink-50 px-3 py-2 text-sm text-slate-900 ring-1 ring-pink-200/70">
-                              <div className="text-xs font-semibold text-pink-600">Motivo del rechazo</div>
-                              <div className="mt-1">{c.decision_note}</div>
-                            </div>
-                          ) : null}
-                          {urls.length ? (
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              {urls.slice(0, 4).map((u) => (
-                                <a
-                                  key={u}
-                                  href={u}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="block h-16 w-16 overflow-hidden rounded-2xl border border-purple-200/60 bg-white shadow-sm"
+                      return (
+                        <tr key={c.id}>
+                          <td className="px-4 py-3 whitespace-nowrap">{when}</td>
+                          <td className="px-4 py-3">{name}</td>
+                          <td className="px-4 py-3 whitespace-nowrap">{phone}</td>
+                          <td className="px-4 py-3 whitespace-nowrap">{c.quantity}</td>
+                          <td className="px-4 py-3 whitespace-nowrap font-extrabold">{formatCop(c.amount)}</td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusPill(c.status)}`}>
+                              {c.status === 'approved' ? 'Aprobado' : c.status === 'pending' ? 'Pendiente' : c.status === 'rejected' ? 'Rechazado' : '—'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            {url ? (
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex h-9 items-center justify-center rounded-2xl border border-purple-200/60 bg-white px-3 text-xs font-extrabold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                              >
+                                Ver
+                              </a>
+                            ) : (
+                              <span className="text-xs font-semibold text-slate-500">—</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 max-w-[420px]">
+                            <div className="truncate text-sm text-slate-700">{note || '—'}</div>
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {c.status === 'pending' ? (
+                              <div className="flex flex-wrap items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  disabled={actingId === c.id}
+                                  onClick={() => openConfirm('rejected', c)}
+                                  className="inline-flex h-9 items-center justify-center rounded-2xl border border-pink-200/70 bg-white px-3 text-xs font-extrabold text-pink-600 shadow-sm transition hover:bg-pink-50 focus:outline-none focus:ring-4 focus:ring-pink-200 disabled:opacity-60"
                                 >
-                                  <img src={u} alt="Soporte" className="h-full w-full object-cover" />
-                                </a>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusPill(c.status)}`}>
-                            {c.status === 'approved' ? 'Aprobado' : c.status === 'pending' ? 'Pendiente' : c.status === 'rejected' ? 'Rechazado' : '—'}
-                          </span>
-                        </div>
-                      </div>
-
-                      {c.status === 'pending' ? (
-                        <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            disabled={actingId === c.id}
-                            onClick={() => openConfirm('rejected', c)}
-                            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl border border-pink-200/70 bg-white px-3 text-sm font-semibold text-pink-600 shadow-sm transition hover:bg-pink-50 focus:outline-none focus:ring-4 focus:ring-pink-200 disabled:opacity-60"
-                          >
-                            <X className="h-4 w-4" aria-hidden="true" />
-                            Rechazar
-                          </button>
-                          <button
-                            type="button"
-                            disabled={actingId === c.id}
-                            onClick={() => openConfirm('approved', c)}
-                            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
-                          >
-                            <Check className="h-4 w-4" aria-hidden="true" />
-                            Aprobar
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                  )
-                })}
+                                  Rechazar
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={actingId === c.id}
+                                  onClick={() => openConfirm('approved', c)}
+                                  className="inline-flex h-9 items-center justify-center rounded-2xl bg-purple-700 px-3 text-xs font-extrabold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
+                                >
+                                  Aprobar
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="text-xs font-semibold text-slate-500">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
               </div>
             ) : (
               <div className="mt-4 rounded-3xl bg-purple-50 p-5 ring-1 ring-purple-200/60">
@@ -646,6 +916,18 @@ export default function AdminActividades() {
             />
           </label>
 
+          <label className="grid gap-2">
+            <span className="text-xs font-semibold text-slate-500">Inversión (costo)</span>
+            <input
+              className="h-11 w-full rounded-xl border border-purple-200/60 bg-white px-3 text-sm outline-none transition focus:border-purple-500 focus:ring-4 focus:ring-purple-200"
+              inputMode="numeric"
+              value={investedAmount}
+              onChange={(e) => setInvestedAmount(e.target.value)}
+              placeholder="Ej: 150000"
+              disabled={saving}
+            />
+          </label>
+
           <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
             <button
               type="button"
@@ -663,6 +945,74 @@ export default function AdminActividades() {
             >
               <Check className="h-4 w-4" aria-hidden="true" />
               {saving ? 'Guardando…' : 'Guardar'}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={closeOpen}
+        title="Cerrar actividad"
+        onClose={() => {
+          setCloseOpen(false)
+          setCloseError('')
+        }}
+      >
+        <div className="grid gap-4">
+          <div className="rounded-2xl bg-purple-50 px-3 py-2 ring-1 ring-purple-200/60">
+            <div className="text-xs font-semibold text-purple-700">Actividad</div>
+            <div className="mt-1 text-sm font-extrabold text-slate-900">
+              {selected ? `${selected.title} · ${selected.category}` : '—'}
+            </div>
+          </div>
+
+          <div className="grid gap-2 rounded-2xl bg-white px-3 py-2 ring-1 ring-purple-200/60">
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span className="font-semibold text-slate-500">Inversión</span>
+              <span className="font-extrabold text-slate-900">{formatCop(activityStats.invested)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span className="font-semibold text-slate-500">Recaudo aprobado</span>
+              <span className="font-extrabold text-slate-900">{formatCop(activityStats.approvedSum)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span className="font-semibold text-slate-500">Ganancia (excedente)</span>
+              <span className="font-extrabold text-purple-700">{formatCop(activityStats.profit)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span className="font-semibold text-slate-500">Participación</span>
+              <span className="font-extrabold text-slate-900">
+                {activityStats.approvedUsers}/{activityStats.memberCount} aprobados
+              </span>
+            </div>
+            {activityStats.missingUsers ? (
+              <div className="rounded-2xl bg-pink-50 px-3 py-2 text-sm text-slate-900 ring-1 ring-pink-200/70">
+                Faltan <span className="font-extrabold">{activityStats.missingUsers}</span> socio(s) por aportar.
+              </div>
+            ) : null}
+          </div>
+
+          <ErrorBanner message={closeError} />
+
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
+            <button
+              type="button"
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl border border-purple-200/60 bg-white px-4 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+              onClick={() => {
+                setCloseOpen(false)
+                setCloseError('')
+              }}
+              disabled={closing}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              disabled={closing || !selected || selected.is_active === false}
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-purple-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-200 disabled:opacity-60 disabled:hover:bg-purple-700"
+              onClick={closeSelectedActivity}
+            >
+              {closing ? 'Cerrando…' : 'Cerrar actividad'}
             </button>
           </div>
         </div>
@@ -693,11 +1043,7 @@ export default function AdminActividades() {
             </label>
           ) : null}
 
-          {confirmError ? (
-            <div role="alert" className="rounded-xl border border-pink-200 bg-white px-3 py-2 text-sm text-slate-900">
-              {confirmError}
-            </div>
-          ) : null}
+          <ErrorBanner message={confirmError} />
 
           <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
             <button

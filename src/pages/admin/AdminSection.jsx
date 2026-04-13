@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Check, RefreshCw } from 'lucide-react'
+import { AlertTriangle, Check, RefreshCw } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient.js'
 
 const BUCKET = import.meta.env.VITE_STORAGE_BUCKET || 'nati-app'
@@ -52,6 +52,28 @@ function statusPill(status) {
   if (status === 'pending') return 'bg-pink-50 text-pink-600 ring-pink-200/70'
   if (status === 'rejected') return 'bg-pink-50 text-pink-600 ring-pink-200/70'
   return 'bg-purple-50 text-purple-700 ring-purple-200/70'
+}
+
+function ErrorBanner({ message, className = '' }) {
+  if (!message) return null
+  return (
+    <div
+      role="alert"
+      className={[
+        'rounded-3xl border border-pink-300 bg-pink-50 px-4 py-3 text-sm font-semibold text-pink-900 shadow-sm',
+        'ring-1 ring-pink-200/70',
+        className,
+      ].join(' ')}
+    >
+      <div className="flex items-start gap-2">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-pink-700" aria-hidden="true" />
+        <div className="min-w-0">
+          <div className="text-xs font-extrabold uppercase tracking-wide text-pink-700">Error</div>
+          <div className="mt-0.5 break-words">{message}</div>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function Modal({ open, title, children, onClose }) {
@@ -1229,7 +1251,9 @@ function AdminIntereses({ title, description }) {
   const [paymentsError, setPaymentsError] = useState('')
   const [payments, setPayments] = useState([])
   const [profilesById, setProfilesById] = useState(() => new Map())
-  const [loansById, setLoansById] = useState(() => new Map())
+  const [activitiesLoading, setActivitiesLoading] = useState(true)
+  const [activitiesError, setActivitiesError] = useState('')
+  const [activityRows, setActivityRows] = useState([])
 
   const loadMembers = useCallback(async () => {
     setMembersLoading(true)
@@ -1238,7 +1262,8 @@ function AdminIntereses({ title, description }) {
     const { data, error } = await supabase
       .from('profiles')
       .select('user_id, full_name, phone, role, is_active')
-      .eq('is_active', true)
+      .eq('role', 'socio')
+      .or('is_active.is.null,is_active.eq.true')
       .order('full_name', { ascending: true })
 
     if (error) {
@@ -1246,7 +1271,7 @@ function AdminIntereses({ title, description }) {
       setMembersError(extra ? `${error.message} (${extra})` : error.message)
       setMembers([])
       setMembersLoading(false)
-      return
+      return []
     }
 
     const list = data ?? []
@@ -1257,6 +1282,7 @@ function AdminIntereses({ title, description }) {
       return m
     })
     setMembersLoading(false)
+    return list
   }, [])
 
   const loadInterestPayments = useCallback(async () => {
@@ -1276,7 +1302,7 @@ function AdminIntereses({ title, description }) {
       setPaymentsError(extra ? `${error.message} (${extra})` : error.message)
       setPayments([])
       setPaymentsLoading(false)
-      return
+      return []
     }
 
     const list = (data ?? []).filter((p) => Number(p.interes_monto ?? 0) > 0)
@@ -1295,34 +1321,108 @@ function AdminIntereses({ title, description }) {
       })
     }
 
-    const loanIds = Array.from(new Set(list.map((p) => p.prestamo_id).filter(Boolean)))
-    if (loanIds.length) {
-      const { data: loans } = await supabase
-        .from('prestamos')
-        .select('id, amount, user_id')
-        .in('id', loanIds)
-      setLoansById(() => {
-        const m = new Map()
-        for (const l of loans ?? []) m.set(l.id, l)
-        return m
-      })
-    } else {
-      setLoansById(new Map())
+    setPaymentsLoading(false)
+    return list
+  }, [])
+
+  const loadActivityProfits = useCallback(async (memberList) => {
+    setActivitiesLoading(true)
+    setActivitiesError('')
+
+    const memberCount = memberList?.length || 0
+    let { data: activities, error } = await supabase
+      .from('activities')
+      .select('id, title, created_at, invested_amount, is_active, closed_at')
+      .order('created_at', { ascending: false })
+
+    if (error?.code === '42703' || error?.code === 'PGRST204') {
+      let retry = await supabase
+        .from('activities')
+        .select('id, title, created_at, invested_amount, is_active')
+        .order('created_at', { ascending: false })
+
+      if (retry.error?.code === '42703' || retry.error?.code === 'PGRST204') {
+        retry = await supabase
+          .from('activities')
+          .select('id, title, created_at, is_active')
+          .order('created_at', { ascending: false })
+      }
+
+      activities = retry.data
+      error = retry.error
     }
 
-    setPaymentsLoading(false)
+    if (error) {
+      const extra = [error.code, error.hint].filter(Boolean).join(' · ')
+      setActivitiesError(extra ? `${error.message} (${extra})` : error.message)
+      setActivityRows([])
+      setActivitiesLoading(false)
+      return []
+    }
+
+    const { data: approved, error: e2 } = await supabase
+      .from('activity_contributions')
+      .select('activity_id, user_id, amount')
+      .eq('status', 'approved')
+
+    if (e2) {
+      const extra = [e2.code, e2.hint].filter(Boolean).join(' · ')
+      setActivitiesError(extra ? `${e2.message} (${extra})` : e2.message)
+      setActivityRows([])
+      setActivitiesLoading(false)
+      return []
+    }
+
+    const byActivity = new Map()
+    for (const r of approved ?? []) {
+      const id = r.activity_id
+      if (!id) continue
+      const amt = Number(r.amount || 0)
+      const prev = byActivity.get(id) || { sum: 0, users: new Set() }
+      prev.sum += Number.isFinite(amt) ? amt : 0
+      if (r.user_id) prev.users.add(r.user_id)
+      byActivity.set(id, prev)
+    }
+
+    const rows = (activities ?? []).map((a) => {
+      const meta = byActivity.get(a.id) || { sum: 0, users: new Set() }
+      const invested = Number(a.invested_amount || 0)
+      const approvedSum = meta.sum
+      const approvedCount = meta.users.size
+      const completed = approvedCount >= memberCount
+      const closed = a.is_active === false
+      const profit = closed ? Math.max(approvedSum - (Number.isFinite(invested) ? invested : 0), 0) : 0
+      return {
+        id: a.id,
+        title: a.title || 'Actividad',
+        created_at: a.created_at,
+        closed_at: a.closed_at,
+        invested_amount: Number.isFinite(invested) ? invested : 0,
+        approved_sum: approvedSum,
+        approved_count: approvedCount,
+        required_count: memberCount,
+        completed,
+        closed,
+        profit,
+      }
+    })
+
+    setActivityRows(rows)
+    setActivitiesLoading(false)
+    return rows
   }, [])
 
   const loadAll = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      await Promise.all([loadMembers(), loadInterestPayments()])
+      const [memberList] = await Promise.all([loadMembers(), loadInterestPayments()])
+      await loadActivityProfits(memberList)
     } catch (err) {
       setError(err.message)
     }
     setLoading(false)
-  }, [loadInterestPayments, loadMembers])
+  }, [loadActivityProfits, loadInterestPayments, loadMembers])
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -1332,20 +1432,70 @@ function AdminIntereses({ title, description }) {
   }, [loadAll])
 
   const interestSummary = useMemo(() => {
-    let totalInterest = 0
+    let loanInterestTotal = 0
     const bySocio = new Map()
 
     for (const p of payments) {
       const interes = Number(p.interes_monto ?? 0)
-      totalInterest += Number.isFinite(interes) ? interes : 0
+      loanInterestTotal += Number.isFinite(interes) ? interes : 0
       if (p.socio_id) {
         const prev = bySocio.get(p.socio_id) || 0
         bySocio.set(p.socio_id, prev + (Number.isFinite(interes) ? interes : 0))
       }
     }
 
-    return { totalInterest, bySocio }
-  }, [payments])
+    const activityProfitTotal = activityRows.reduce((sum, r) => sum + (Number.isFinite(r.profit) ? r.profit : 0), 0)
+    const totalInterest = loanInterestTotal + activityProfitTotal
+
+    return { totalInterest, loanInterestTotal, activityProfitTotal, bySocio }
+  }, [activityRows, payments])
+
+  const interestEvents = useMemo(() => {
+    const rows = []
+
+    for (const p of payments) {
+      const amount = Number(p.interes_monto ?? 0)
+      if (!Number.isFinite(amount) || amount <= 0) continue
+      const profile = profilesById.get(p.socio_id)
+      const who = profile?.full_name || profile?.phone || 'Socio'
+      const whenValue = p.fecha_pago || p.created_at
+      const when = whenValue ? new Date(whenValue) : null
+      rows.push({
+        id: `loan-${p.id}`,
+        kind: 'prestamo',
+        when,
+        label: who,
+        detail: p.mes_correspondiente ? `Interés · ${p.mes_correspondiente}` : 'Interés',
+        amount,
+        receiptPath: p.comprobante_url || '',
+      })
+    }
+
+    for (const a of activityRows) {
+      if (!a.closed) continue
+      const amount = Number(a.profit || 0)
+      if (!Number.isFinite(amount) || amount <= 0) continue
+      const whenValue = a.closed_at || a.created_at
+      const when = whenValue ? new Date(whenValue) : null
+      rows.push({
+        id: `act-${a.id}`,
+        kind: 'actividad',
+        when,
+        label: a.title || 'Actividad',
+        detail: 'Ganancia por actividad',
+        amount,
+        receiptPath: '',
+      })
+    }
+
+    rows.sort((a, b) => {
+      const at = a.when ? a.when.getTime() : 0
+      const bt = b.when ? b.when.getTime() : 0
+      return bt - at
+    })
+
+    return rows
+  }, [activityRows, payments, profilesById])
 
   const interestSharePerMember = useMemo(() => {
     const count = members.length || 0
@@ -1372,29 +1522,26 @@ function AdminIntereses({ title, description }) {
         </button>
       </div>
 
-      {error ? (
-        <div className="rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">{error}</div>
-      ) : null}
-
-      {membersError ? (
-        <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
-          {membersError}
-        </div>
-      ) : null}
-
-      {paymentsError ? (
-        <div className="mt-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
-          {paymentsError}
-        </div>
-      ) : null}
+      <ErrorBanner message={error} />
+      <ErrorBanner message={membersError} className="mt-3" />
+      <ErrorBanner message={paymentsError} className="mt-3" />
+      <ErrorBanner message={activitiesError} className="mt-3" />
 
       <div className="grid gap-3 lg:grid-cols-3">
         <div className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-purple-200/50 lg:col-span-1">
           <div className="text-sm font-bold text-slate-900">Resumen</div>
           <div className="mt-4 grid gap-2 rounded-2xl bg-purple-50 px-4 py-3 ring-1 ring-purple-200/60">
             <div className="flex items-center justify-between gap-2 text-sm">
-              <span className="font-semibold text-slate-500">Intereses aprobados acumulados</span>
+              <span className="font-semibold text-slate-500">Intereses acumulados</span>
               <span className="font-extrabold text-slate-900">{formatCop(interestSummary.totalInterest)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span className="font-semibold text-slate-500">Intereses por préstamos</span>
+              <span className="font-extrabold text-slate-900">{formatCop(interestSummary.loanInterestTotal)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span className="font-semibold text-slate-500">Ganancias por actividades</span>
+              <span className="font-extrabold text-slate-900">{formatCop(interestSummary.activityProfitTotal)}</span>
             </div>
             <div className="flex items-center justify-between gap-2 text-sm">
               <span className="font-semibold text-slate-500">Socios activos</span>
@@ -1453,53 +1600,62 @@ function AdminIntereses({ title, description }) {
       <div className="mt-4 rounded-3xl bg-white p-5 shadow-sm ring-1 ring-purple-200/50">
         <div className="text-sm font-bold text-slate-900">Historial de intereses</div>
 
-        {paymentsLoading ? (
+        {paymentsLoading || activitiesLoading ? (
           <div className="mt-4 grid gap-2">
             {Array.from({ length: 6 }).map((_, i) => (
               <div key={i} className="h-12 animate-pulse rounded-2xl bg-purple-50 ring-1 ring-purple-200/60" />
             ))}
           </div>
-        ) : payments.length ? (
-          <div className="mt-4 grid gap-2">
-            {payments.map((p) => {
-              const profile = profilesById.get(p.socio_id)
-              const name = profile?.full_name || profile?.phone || 'Socio'
-              const paidAt = p.fecha_pago
-                ? new Date(p.fecha_pago).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
-                : p.created_at
-                ? new Date(p.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
-                : '—'
-              const loan = loansById.get(p.prestamo_id)
-              const receiptUrl = p.comprobante_url ? publicUrlFor(p.comprobante_url) : ''
-
-              return (
-                <div key={p.id} className="rounded-2xl border border-purple-200/50 bg-white px-3 py-3 shadow-sm">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-extrabold text-slate-900">{name}</div>
-                      <div className="mt-0.5 text-xs font-semibold text-slate-500">
-                        {paidAt}
-                        {p.mes_correspondiente ? ` · ${p.mes_correspondiente}` : ''}
-                        {loan?.amount ? ` · Préstamo: ${formatCop(loan.amount)}` : ''}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="text-sm font-extrabold text-slate-900">{formatCop(p.interes_monto ?? 0)}</div>
-                      {receiptUrl ? (
-                        <a
-                          className="inline-flex h-10 items-center justify-center rounded-2xl border border-purple-200/60 bg-white px-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
-                          href={receiptUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          Ver comprobante
-                        </a>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
+        ) : interestEvents.length ? (
+          <div className="mt-4 overflow-x-auto rounded-3xl ring-1 ring-purple-200/60">
+            <table className="w-full min-w-[980px] border-separate border-spacing-0">
+              <thead className="bg-purple-50">
+                <tr className="text-left text-xs font-extrabold text-slate-700">
+                  <th className="px-4 py-3">Fecha</th>
+                  <th className="px-4 py-3">Tipo</th>
+                  <th className="px-4 py-3">Detalle</th>
+                  <th className="px-4 py-3">Monto</th>
+                  <th className="px-4 py-3">Soporte</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-purple-200/40 bg-white text-sm text-slate-900">
+                {interestEvents.map((e) => {
+                  const when = e.when
+                    ? e.when.toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })
+                    : '—'
+                  const receiptUrl = e.receiptPath ? publicUrlFor(e.receiptPath) : ''
+                  return (
+                    <tr key={e.id}>
+                      <td className="px-4 py-3 whitespace-nowrap">{when}</td>
+                      <td className="px-4 py-3">
+                        <span className="inline-flex rounded-full bg-purple-50 px-2 py-0.5 text-[11px] font-semibold text-purple-700 ring-1 ring-purple-200/70">
+                          {e.kind === 'prestamo' ? 'Préstamo' : 'Actividad'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="font-extrabold">{e.label}</div>
+                        <div className="mt-0.5 text-xs font-semibold text-slate-500">{e.detail}</div>
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap font-extrabold text-slate-900">{formatCop(e.amount)}</td>
+                      <td className="px-4 py-3">
+                        {receiptUrl ? (
+                          <a
+                            className="inline-flex h-9 items-center justify-center rounded-2xl border border-purple-200/60 bg-white px-3 text-xs font-extrabold text-slate-900 shadow-sm transition hover:bg-purple-50 focus:outline-none focus:ring-4 focus:ring-purple-200"
+                            href={receiptUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Ver
+                          </a>
+                        ) : (
+                          <span className="text-xs font-semibold text-slate-500">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
         ) : (
           <div className="mt-4 rounded-3xl bg-purple-50 p-5 ring-1 ring-purple-200/60">
@@ -1508,6 +1664,7 @@ function AdminIntereses({ title, description }) {
           </div>
         )}
       </div>
+
     </div>
   )
 }

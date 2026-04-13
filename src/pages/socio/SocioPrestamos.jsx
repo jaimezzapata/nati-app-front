@@ -30,6 +30,10 @@ function guessExtFromName(name) {
 
 const BUCKET = import.meta.env.VITE_STORAGE_BUCKET || 'nati-app'
 
+function makePrestamoReceiptPath(userId, ext) {
+  return `prestamos/${userId}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`
+}
+
 function normalizeMonthLabel(value) {
   return String(value || '')
     .trim()
@@ -343,7 +347,7 @@ export default function SocioPrestamos() {
       return
     }
 
-    const loan = loans.find(l => l.id === payLoanId)
+    const loan = loans.find((l) => l.id === payLoanId)
     if (!loan) {
       setPayError('Préstamo no encontrado')
       return
@@ -351,7 +355,19 @@ export default function SocioPrestamos() {
 
     const principal = Number(loan.amount)
     const rate = Number(loan.interest_rate_percent)
-    const interestMonth = principal * (Number.isFinite(rate) ? rate : 0) / 100
+    const paidCap = paidCapitalByLoanId.get(loan.id) || 0
+    const remainingPrincipal = Math.max(0, (Number.isFinite(principal) ? principal : 0) - (Number.isFinite(paidCap) ? paidCap : 0))
+    const interestMonth = remainingPrincipal * (Number.isFinite(rate) ? rate : 0) / 100
+
+    const loanDate = loan.created_at ? new Date(loan.created_at) : null
+    const now = new Date()
+    const months = loanDate
+      ? Math.max(0, (now.getFullYear() * 12 + now.getMonth()) - (loanDate.getFullYear() * 12 + loanDate.getMonth()))
+      : 0
+    const interestAccrued = months * interestMonth
+    const interestPaidSum = interestPaidSumByLoanId.get(loan.id) || 0
+    const interestDue = Math.max(0, interestAccrued - (Number.isFinite(interestPaidSum) ? interestPaidSum : 0))
+    const totalSuggested = remainingPrincipal + interestDue
 
     const totalPaid =
       payType === 'total' ? Number(payTotalStr) : interestMonth
@@ -361,19 +377,19 @@ export default function SocioPrestamos() {
       return
     }
 
-    if (payType === 'total' && totalPaid < principal) {
-      setPayError(`Si vas a pagar el total, el monto debe ser al menos ${formatCop(principal)}`)
+    if (payType === 'total' && totalPaid < totalSuggested) {
+      setPayError(`Para liquidar necesitas mínimo ${formatCop(totalSuggested)}`)
       return
     }
 
-    const capitalMonto = payType === 'total' ? principal : 0
-    const interesMonto = payType === 'total' ? Math.max(0, totalPaid - principal) : totalPaid
+    const capitalMonto = payType === 'total' ? remainingPrincipal : 0
+    const interesMonto = payType === 'total' ? Math.max(0, totalPaid - remainingPrincipal) : totalPaid
 
     setPaying(true)
 
     // Upload receipt
     const ext = guessExtFromName(payFile.name)
-    const filePath = `prestamos/${userId}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`
+    const filePath = makePrestamoReceiptPath(userId, ext)
 
     const { error: uploadError } = await supabase.storage.from(BUCKET).upload(filePath, payFile)
     if (uploadError) {
@@ -430,9 +446,51 @@ export default function SocioPrestamos() {
     return m
   }, [payments])
 
+  const interestPaidSumByLoanId = (() => {
+    const m = new Map()
+    for (const p of payments) {
+      if (p.estado === 'rejected') continue
+      if (!p.prestamo_id) continue
+      const interes = Number(p.interes_monto ?? 0)
+      if (!Number.isFinite(interes) || interes <= 0) continue
+      const prev = m.get(p.prestamo_id) || 0
+      m.set(p.prestamo_id, prev + interes)
+    }
+    return m
+  })()
+
   const nowMonthLabel = useMemo(() => monthLabelForNow(), [])
   const nowMonthKey = useMemo(() => normalizeMonthLabel(nowMonthLabel), [nowMonthLabel])
   const dueDate = useMemo(() => dueDateForYear(new Date().getFullYear()), [])
+
+  const payLoan = useMemo(() => payableLoans.find((l) => l.id === payLoanId) ?? null, [payLoanId, payableLoans])
+
+  const payLoanComputed = useMemo(() => {
+    if (!payLoan) return null
+    const principal = Number(payLoan.amount)
+    const paidCap = paidCapitalByLoanId.get(payLoan.id) || 0
+    const remainingPrincipal = Math.max(0, (Number.isFinite(principal) ? principal : 0) - (Number.isFinite(paidCap) ? paidCap : 0))
+    const rate = Number(payLoan.interest_rate_percent)
+    const monthlyInterest = remainingPrincipal * (Number.isFinite(rate) ? rate : 0) / 100
+    const interestPaidSum = interestPaidSumByLoanId.get(payLoan.id) || 0
+    const loanDate = payLoan.created_at ? new Date(payLoan.created_at) : null
+    const now = new Date()
+    const months = loanDate
+      ? Math.max(0, (now.getFullYear() * 12 + now.getMonth()) - (loanDate.getFullYear() * 12 + loanDate.getMonth()))
+      : 0
+    const interestAccrued = months * monthlyInterest
+    const interestDue = Math.max(0, interestAccrued - (Number.isFinite(interestPaidSum) ? interestPaidSum : 0))
+    const totalSuggested = remainingPrincipal + interestDue
+    return {
+      remainingPrincipal,
+      monthlyInterest,
+      months,
+      interestAccrued,
+      interestPaidSum: Number.isFinite(interestPaidSum) ? interestPaidSum : 0,
+      interestDue,
+      totalSuggested,
+    }
+  }, [interestPaidSumByLoanId, paidCapitalByLoanId, payLoan])
 
   function selectLoanForPayment(loanId) {
     const loan = payableLoans.find((l) => l.id === loanId)
@@ -457,7 +515,20 @@ export default function SocioPrestamos() {
         const v = String(prev || '').trim()
         if (v) return v
         const principal = Number(loan.amount)
-        return Number.isFinite(principal) && principal > 0 ? String(principal) : ''
+        const paidCap = paidCapitalByLoanId.get(loan.id) || 0
+        const remainingPrincipal = Math.max(0, (Number.isFinite(principal) ? principal : 0) - (Number.isFinite(paidCap) ? paidCap : 0))
+        const rate = Number(loan.interest_rate_percent)
+        const monthlyInterest = remainingPrincipal * (Number.isFinite(rate) ? rate : 0) / 100
+        const interestPaidSum = interestPaidSumByLoanId.get(loan.id) || 0
+        const loanDate = loan.created_at ? new Date(loan.created_at) : null
+        const now = new Date()
+        const months = loanDate
+          ? Math.max(0, (now.getFullYear() * 12 + now.getMonth()) - (loanDate.getFullYear() * 12 + loanDate.getMonth()))
+          : 0
+        const interestAccrued = months * monthlyInterest
+        const interestDue = Math.max(0, interestAccrued - (Number.isFinite(interestPaidSum) ? interestPaidSum : 0))
+        const suggested = remainingPrincipal + interestDue
+        return Number.isFinite(suggested) && suggested > 0 ? String(Math.round(suggested)) : String(Math.round(remainingPrincipal))
       })
     }
   }
@@ -630,7 +701,9 @@ export default function SocioPrestamos() {
                   <thead className="bg-purple-50">
                     <tr className="text-left text-xs font-extrabold text-slate-700">
                       <th className="px-4 py-3">Préstamo</th>
+                      <th className="px-4 py-3">Capital</th>
                       <th className="px-4 py-3">Interés mes</th>
+                      <th className="px-4 py-3">Interés pendiente</th>
                       <th className="px-4 py-3">Estado</th>
                       <th className="px-4 py-3">Límite</th>
                       <th className="px-4 py-3 text-right">Acción</th>
@@ -640,9 +713,10 @@ export default function SocioPrestamos() {
                     {payableLoans.map((l) => {
                       const createdAt = l.created_at ? new Date(l.created_at).toLocaleDateString('es-CO') : '—'
                       const principal = Number(l.amount)
+                      const paidCap = paidCapitalByLoanId.get(l.id) || 0
+                      const remaining = Math.max(0, (Number.isFinite(principal) ? principal : 0) - (Number.isFinite(paidCap) ? paidCap : 0))
                       const rate = Number(l.interest_rate_percent)
-                      const interestMonth = principal * (Number.isFinite(rate) ? rate : 0) / 100
-                      const remaining = principal
+                      const interestMonth = remaining * (Number.isFinite(rate) ? rate : 0) / 100
                       const paidMonths = interestPaidByLoanMonthKey.get(l.id) || new Set()
                       const hasInterestThisMonth = paidMonths.has(nowMonthKey)
                       const created = l.created_at ? new Date(l.created_at) : null
@@ -655,6 +729,14 @@ export default function SocioPrestamos() {
                         : hasInterestThisMonth || createdSameMonth
                         ? 'bg-purple-50 text-purple-700 ring-purple-200/70'
                         : 'bg-amber-50 text-amber-800 ring-amber-200/70'
+                      const loanDate = l.created_at ? new Date(l.created_at) : null
+                      const now = new Date()
+                      const months = loanDate
+                        ? Math.max(0, (now.getFullYear() * 12 + now.getMonth()) - (loanDate.getFullYear() * 12 + loanDate.getMonth()))
+                        : 0
+                      const interestAccrued = months * interestMonth
+                      const interestPaidSum = interestPaidSumByLoanId.get(l.id) || 0
+                      const interestDue = Math.max(0, interestAccrued - (Number.isFinite(interestPaidSum) ? interestPaidSum : 0))
 
                       return (
                         <tr key={l.id} className="text-sm text-slate-900">
@@ -664,7 +746,9 @@ export default function SocioPrestamos() {
                               {createdAt} · {Number.isFinite(rate) ? `${rate}%` : '—'} mensual
                             </div>
                           </td>
+                          <td className="px-4 py-3 whitespace-nowrap font-extrabold">{formatCop(remaining)}</td>
                           <td className="px-4 py-3 whitespace-nowrap font-extrabold">{formatCop(interestMonth)}</td>
+                          <td className="px-4 py-3 whitespace-nowrap font-extrabold text-purple-700">{formatCop(interestDue)}</td>
                           <td className="px-4 py-3">
                             <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${statusTone}`}>
                               {statusLabel}
@@ -799,9 +883,10 @@ export default function SocioPrestamos() {
                   setPayMonth('')
                   setPayTotalStr((prev) => {
                     if (String(prev || '').trim()) return prev
-                    const loan = payableLoans.find((l) => l.id === payLoanId)
-                    const principal = Number(loan?.amount)
-                    return Number.isFinite(principal) && principal > 0 ? String(principal) : ''
+                    const suggested = payLoanComputed?.totalSuggested
+                    if (Number.isFinite(suggested) && suggested > 0) return String(Math.round(suggested))
+                    const remaining = payLoanComputed?.remainingPrincipal
+                    return Number.isFinite(remaining) && remaining > 0 ? String(Math.round(remaining)) : ''
                   })
                 }}
                 className={[
@@ -840,6 +925,13 @@ export default function SocioPrestamos() {
                   onChange={(e) => setPayTotalStr(e.target.value)}
                   required
                 />
+                {payLoanComputed ? (
+                  <div className="text-[11px] font-semibold text-slate-500">
+                    Capital: <span className="text-slate-900">{formatCop(payLoanComputed.remainingPrincipal)}</span> ·
+                    Interés pendiente: <span className="text-slate-900">{formatCop(payLoanComputed.interestDue)}</span> ·
+                    Mínimo para liquidar: <span className="text-slate-900">{formatCop(payLoanComputed.totalSuggested)}</span>
+                  </div>
+                ) : null}
               </label>
             )}
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { CalendarDays, HandCoins, Users, Wallet } from 'lucide-react'
+import { AlertTriangle, CalendarDays, HandCoins, Users, Wallet } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient.js'
 
 function formatCop(value) {
@@ -87,6 +87,24 @@ function MetricCard({ title, value, hint, to, icon, accent = 'purple' }) {
         </div>
       </div>
     </Link>
+  )
+}
+
+function ErrorBanner({ message }) {
+  if (!message) return null
+  return (
+    <div
+      role="alert"
+      className="mb-3 rounded-3xl border border-pink-300 bg-pink-50 px-4 py-3 text-sm font-semibold text-pink-900 shadow-sm ring-1 ring-pink-200/70"
+    >
+      <div className="flex items-start gap-2">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-pink-700" aria-hidden="true" />
+        <div className="min-w-0">
+          <div className="text-xs font-extrabold uppercase tracking-wide text-pink-700">Error</div>
+          <div className="mt-0.5 break-words">{message}</div>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -320,6 +338,7 @@ export default function AdminHome() {
   const [error, setError] = useState('')
   const [sociosActivos, setSociosActivos] = useState(0)
   const [prestamosActivos, setPrestamosActivos] = useState(0)
+  const [activeInvested, setActiveInvested] = useState(0)
   const [monthlyAhorro, setMonthlyAhorro] = useState(() =>
     months.map((m, i) => ({
       label: m.label,
@@ -352,6 +371,7 @@ export default function AdminHome() {
       prestamosApprovedRes,
       abonosMesRes,
       prestamosMesRes,
+      activitiesRes,
     ] = await Promise.all([
       supabase
         .from('profiles')
@@ -378,6 +398,10 @@ export default function AdminHome() {
         .select('status')
         .gte('created_at', currentMonthStart.toISOString())
         .lt('created_at', nextMonthStart.toISOString()),
+      supabase
+        .from('activities')
+        .select('invested_amount')
+        .neq('is_active', false)
     ])
 
     const anyError =
@@ -385,16 +409,20 @@ export default function AdminHome() {
       abonosRes.error ||
       prestamosApprovedRes.error ||
       abonosMesRes.error ||
-      prestamosMesRes.error
+      prestamosMesRes.error ||
+      activitiesRes.error
 
     if (anyError) {
-      const err = sociosRes.error || abonosRes.error || prestamosApprovedRes.error || abonosMesRes.error || prestamosMesRes.error
+      const err = sociosRes.error || abonosRes.error || prestamosApprovedRes.error || abonosMesRes.error || prestamosMesRes.error || activitiesRes.error
       const extra = [err.code, err.hint].filter(Boolean).join(' · ')
       setError(extra ? `${err.message} (${extra})` : err.message)
     }
 
     setSociosActivos(sociosRes.count ?? 0)
     setPrestamosActivos(prestamosApprovedRes.count ?? 0)
+
+    const activeActInvested = (activitiesRes.data ?? []).reduce((acc, a) => acc + Number(a.invested_amount || 0), 0)
+    setActiveInvested(activeActInvested)
 
     const monthTotals = new Map()
     for (const r of abonosRes.data ?? []) {
@@ -435,7 +463,7 @@ export default function AdminHome() {
     return () => clearTimeout(t)
   }, [load])
 
-  const totalAhorrado = useMemo(() => monthlyAhorro.reduce((acc, d) => acc + d.value, 0), [monthlyAhorro])
+  const totalAhorrado = useMemo(() => Math.max(0, monthlyAhorro.reduce((acc, d) => acc + d.value, 0) - activeInvested), [monthlyAhorro, activeInvested])
   const ahorroMes = monthlyAhorro.at(-1)?.value ?? 0
 
   return (
@@ -447,11 +475,7 @@ export default function AdminHome() {
         </p>
       </div>
 
-      {error ? (
-        <div role="alert" className="mb-3 rounded-2xl border border-pink-200 bg-white px-4 py-3 text-sm text-slate-900">
-          {error}
-        </div>
-      ) : null}
+      <ErrorBanner message={error} />
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <MetricCard

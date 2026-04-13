@@ -153,6 +153,8 @@ export default function AbonosGrid({ mode, userId }) {
   const [approveAllOpen, setApproveAllOpen] = useState(false)
   const [approveAllSaving, setApproveAllSaving] = useState(false)
 
+  const [activeInvested, setActiveInvested] = useState(0)
+
   const cellRecordsMap = useMemo(() => {
     const m = new Map()
     for (const r of rows) {
@@ -184,10 +186,11 @@ export default function AbonosGrid({ mode, userId }) {
   }, [cellRecordsMap])
 
   const totalAhorrado = useMemo(() => {
-    return rows
+    const sumAbonos = rows
       .filter((r) => r.status === 'approved')
       .reduce((acc, r) => acc + Number(r.amount || 0), 0)
-  }, [rows])
+    return Math.max(0, sumAbonos - activeInvested)
+  }, [rows, activeInvested])
 
   const pendingIds = useMemo(() => {
     return rows.filter((r) => r.status === 'pending' && r.id).map((r) => r.id)
@@ -207,14 +210,24 @@ export default function AbonosGrid({ mode, userId }) {
     const from = isoDate(periodStart)
     const to = isoDate(periodEnd)
 
-    const first = await supabase
-      .from('abonos')
-      .select('id, user_id, period_date, quincena, amount, status, note, created_at, created_by, paid_at, support_paths')
-      .eq('user_id', userId)
-      .gte('period_date', from)
-      .lte('period_date', to)
-      .order('period_date', { ascending: true })
-      .order('quincena', { ascending: true })
+    const [first, actRes] = await Promise.all([
+      supabase
+        .from('abonos')
+        .select('id, user_id, period_date, quincena, amount, status, note, created_at, created_by, paid_at, support_paths')
+        .eq('user_id', userId)
+        .gte('period_date', from)
+        .lte('period_date', to)
+        .order('period_date', { ascending: true })
+        .order('quincena', { ascending: true }),
+      mode === 'admin'
+        ? supabase.from('activities').select('invested_amount').neq('is_active', false)
+        : Promise.resolve({ data: [] })
+    ])
+
+    if (actRes.data) {
+      const actInv = actRes.data.reduce((acc, a) => acc + Number(a.invested_amount || 0), 0)
+      setActiveInvested(actInv)
+    }
 
     if (first.error) {
       if (first.error.code === '42703' && (String(first.error.message ?? '').includes('paid_at') || String(first.error.message ?? '').includes('support_paths'))) {
@@ -247,7 +260,7 @@ export default function AbonosGrid({ mode, userId }) {
 
     setRows(first.data ?? [])
     setLoading(false)
-  }, [periodEnd, periodStart, userId])
+  }, [mode, periodEnd, periodStart, userId])
 
   useEffect(() => {
     const t = setTimeout(() => {
