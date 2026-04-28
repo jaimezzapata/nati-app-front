@@ -338,6 +338,7 @@ export default function AbonosGrid({ mode, userId }) {
       return
     }
 
+    const actorUserId = session.user.id
     const targetUserId = mode === 'admin' ? userId : session.user.id
 
     setSaving(true)
@@ -368,6 +369,7 @@ export default function AbonosGrid({ mode, userId }) {
       status: mode === 'admin' ? status : 'pending',
       paid_at: paidIso,
       support_paths: supportPaths.length ? supportPaths : null,
+      ...(mode === 'admin' ? { created_by: actorUserId } : {}),
     }
 
     const shouldInsert =
@@ -546,6 +548,7 @@ export default function AbonosGrid({ mode, userId }) {
 
     const paidIso = datetimeLocalToIso(bulkPaidAt) || new Date().toISOString()
     const desiredStatus = mode === 'admin' ? bulkStatus : 'pending'
+    const actorUserId = session.user.id
     const targetUserId = mode === 'admin' ? userId : session.user.id
 
     let sharedSupportPaths = []
@@ -581,6 +584,7 @@ export default function AbonosGrid({ mode, userId }) {
           status: desiredStatus,
           paid_at: paidIso,
           support_paths: sharedSupportPaths.length ? sharedSupportPaths : null,
+          ...(mode === 'admin' ? { created_by: actorUserId } : {}),
         })
       }
     }
